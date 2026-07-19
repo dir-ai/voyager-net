@@ -2,6 +2,7 @@ import http from 'node:http'
 import https from 'node:https'
 import type { LookupFunction } from 'node:net'
 import { stripInjection } from '@dir-ai/voyager'
+import { defang } from './fingerprint.js'
 import { blockedIpReason } from './authorize.js'
 import type { HttpSurface } from './types.js'
 
@@ -50,7 +51,7 @@ export async function inspectHttp(pinnedIp: string, hostname: string, port: numb
         res.destroy() // headers are enough; do not read the body
         done({
           port, url, status: res.statusCode ?? null,
-          server: server ? stripInjection(server).slice(0, 120) : null,
+          server: server ? defang(stripInjection(server)).slice(0, 120) : null,
           securityHeaders: present,
           headerValues: {
             hsts: first(res.headers['strict-transport-security']),

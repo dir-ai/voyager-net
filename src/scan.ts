@@ -6,7 +6,6 @@ import { inspectTls } from './tls.js'
 import { inspectHttp } from './http.js'
 import type { Confidence, NetBrief, NetFinding, ScanOptions } from './types.js'
 
-const TLS_PORTS = new Set([443, 8443, 993, 995, 465, 5432])
 const HTTP_PORTS = new Set([80, 8080, 3000])
 const HTTPS_PORTS = new Set([443, 8443])
 const SENSITIVE: Record<number, string> = { 23: 'telnet', 3306: 'mysql', 5432: 'postgres', 6379: 'redis', 27017: 'mongodb', 9200: 'elasticsearch', 5900: 'vnc', 3389: 'rdp', 445: 'smb' }
@@ -56,19 +55,22 @@ export async function scan(input: string, opts: ScanOptions = {}): Promise<NetBr
   const open = portResults.filter((p) => p.state === 'open')
 
   log('inspecting TLS + HTTP…')
-  const openTlsPorts = open.filter((p) => TLS_PORTS.has(p.port))
-  const openHttpPorts = open.filter((p) => HTTP_PORTS.has(p.port) || HTTPS_PORTS.has(p.port))
-  // BOTH TLS and HTTP connect to the PINNED IP (host only for SNI/Host header),
-  // so nothing re-resolves the name mid-scan (anti-rebinding holds end to end).
-  const tlsInfos = (await Promise.all(openTlsPorts.map((p) => inspectTls(pin, p.port, host, timeoutMs + 3000)))).filter(Boolean) as NonNullable<Awaited<ReturnType<typeof inspectTls>>>[]
-  const httpInfos = (await Promise.all(openHttpPorts.map((p) => inspectHttp(pin, host, p.port, HTTPS_PORTS.has(p.port), timeoutMs + 3000)))).filter(Boolean) as NonNullable<Awaited<ReturnType<typeof inspectHttp>>>[]
+  // Inspect by PROTOCOL, not by hardcoded port number: an HTTP admin panel on
+  // :31811 or a DB speaking TLS on :31813 must not be skipped just because the
+  // port isn't in a fixed set. Try TLS on EVERY open port; where it handshakes
+  // it's TLS (→ probe HTTP-over-TLS), else try plain HTTP. All pinned to the IP.
+  const tlsInfos = (await Promise.all(open.map((p) => inspectTls(pin, p.port, host, timeoutMs + 3000)))).filter(Boolean) as NonNullable<Awaited<ReturnType<typeof inspectTls>>>[]
+  const tlsPorts = new Set(tlsInfos.map((t) => t.port))
+  const httpInfos = (await Promise.all(open.map((p) => inspectHttp(pin, host, p.port, tlsPorts.has(p.port), timeoutMs + 3000)))).filter(Boolean) as NonNullable<Awaited<ReturnType<typeof inspectHttp>>>[]
 
   // ── Findings ────────────────────────────────────────────────────────────────
   const findings: NetFinding[] = []
   const notes: string[] = []
-  // Honesty: an OPEN port whose TLS/HTTP inspection failed is UNKNOWN, not clean.
-  if (tlsInfos.length < openTlsPorts.length) notes.push(`${openTlsPorts.length - tlsInfos.length} open TLS port(s) could not be inspected (handshake failed/timed out) — TLS posture there is UNKNOWN, not clean`)
-  if (httpInfos.length < openHttpPorts.length) notes.push(`${openHttpPorts.length - httpInfos.length} open HTTP port(s) could not be inspected — header posture there is UNKNOWN`)
+  // Honesty: an open port with NO banner and no TLS/HTTP answer is genuinely
+  // unknown (not "clean"). A fingerprinted service (ssh/redis/…) isn't "dark".
+  const inspectedPorts = new Set<number>([...tlsPorts, ...httpInfos.map((h) => h.port)])
+  const dark = open.filter((p) => !inspectedPorts.has(p.port) && !p.product)
+  if (dark.length) notes.push(`${dark.length} open port(s) volunteered no banner and answered neither TLS nor HTTP — service UNKNOWN, not clean (ports: ${dark.map((p) => p.port).slice(0, 12).join(', ')})`)
 
   for (const p of open) {
     if (SENSITIVE[p.port]) {

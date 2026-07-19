@@ -1,5 +1,15 @@
 import { stripInjection } from '@dir-ai/voyager'
 
+/** Defang target-controlled text so a hostile banner/header can't smuggle a live,
+ *  clickable/executable-looking URL or command into the brief. http→hxxp, dot→[.],
+ *  and known download-and-run shapes are neutered. Purely cosmetic-safety. */
+export function defang(s: string): string {
+  return s
+    .replace(/\bhttps?:\/\//gi, (m) => m.replace(/t/gi, 'x'))
+    .replace(/\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b/g, '$1[.]$2[.]$3[.]$4')
+    .replace(/\|\s*(sh|bash|zsh|python\d?)\b/gi, '| [defanged-$1]')
+}
+
 export interface Fingerprint {
   /** The volunteered banner, injection-stripped and bounded. */
   banner: string
@@ -36,7 +46,7 @@ function versionOf(token: string): string | undefined {
 export function fingerprintBanner(raw: string, _port: number): Fingerprint {
   // Strip control bytes, keep the first line, frame it (untrusted content).
   const firstLine = (raw.split(/\r|\n/)[0] ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ')
-  const banner = stripInjection(firstLine).trim().slice(0, 200)
+  const banner = defang(stripInjection(firstLine)).trim().slice(0, 200)
   if (!banner) return { banner: '' }
   for (const rule of RULES) {
     const m = banner.match(rule.re)

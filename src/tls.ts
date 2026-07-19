@@ -20,7 +20,12 @@ function probeProtocol(ip: string, port: number, servername: string, p: (typeof 
     const fin = (v: boolean) => { if (!done) { done = true; resolve(v) } }
     let s: tls.TLSSocket
     try {
-      s = tls.connect({ host: ip, port, servername: sniOf(servername), rejectUnauthorized: false, minVersion: p.min, maxVersion: p.max, timeout: timeoutMs }, () => { s.destroy(); fin(true) })
+      // For the DEPRECATED versions, drop the local OpenSSL security level so our
+      // OWN OpenSSL 3 build doesn't refuse the handshake first ("legacy sigalg
+      // disallowed") — otherwise we'd report a server that STILL accepts TLS 1.0/1.1
+      // as clean. We only ask; the server decides. Modern versions keep the default.
+      const weak = p.min === 'TLSv1' || p.min === 'TLSv1.1'
+      s = tls.connect({ host: ip, port, servername: sniOf(servername), rejectUnauthorized: false, minVersion: p.min, maxVersion: p.max, timeout: timeoutMs, ...(weak ? { ciphers: 'DEFAULT@SECLEVEL=0' } : {}) }, () => { s.destroy(); fin(true) })
     } catch { return fin(false) }
     s.once('error', () => fin(false))
     s.once('timeout', () => { s.destroy(); fin(false) })

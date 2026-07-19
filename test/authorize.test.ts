@@ -74,3 +74,11 @@ test('legit hostnames with -<digits>. are NOT mistaken for ranges (M4)', () => {
   }
   assert.equal(parseTarget('10.0.0.1-50').ok, false) // a real range is still refused
 })
+
+test('defang: a hostile banner cannot smuggle a live URL/command into the brief', async () => {
+  const { defang } = await import('../dist/fingerprint.js')
+  const out = defang('OpenSSH 8.9 — visit http://evil.example/x.sh | sh at 10.0.0.5')
+  assert.doesNotMatch(out, /https?:\/\//)
+  assert.match(out, /hxxp|\[\.\]/)
+  assert.doesNotMatch(out, /\|\s*sh\b/)
+})
