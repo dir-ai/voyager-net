@@ -2,9 +2,26 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.dir-ai/voyager-net",
   "description": "A safe, read-only, authorized audit of one host you own: DNS, ports, TLS, HTTP hygiene.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "packages": [
-    { "registryType": "npm", "identifier": "@dir-ai/voyager-net", "version": "0.1.0", "transport": { "type": "stdio" }, "packageArguments": [ { "type": "positional", "valueHint": "subcommand", "value": "mcp" } ] }
+    {
+      "registryType": "npm",
+      "identifier": "@dir-ai/voyager-net",
+      "version": "0.2.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "valueHint": "subcommand",
+          "value": "mcp"
+        }
+      ]
+    }
   ],
-  "repository": { "url": "https://github.com/dir-ai/voyager-net", "source": "github" }
+  "repository": {
+    "url": "https://github.com/dir-ai/voyager-net",
+    "source": "github"
+  }
 }

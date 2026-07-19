@@ -16,12 +16,26 @@ voyager-net scan 10.0.5.20 --authorized --ports 22,80,443,5432
 
 ## What it checks (read-only)
 
+- **Resolve-once + IP pinning** — a domain is resolved a single time and every
+  probe is pinned to that IP (anti DNS-rebinding); a resolved metadata/link-local
+  IP is refused.
 - **DNS** — A/AAAA/MX/TXT/CAA + email/CA hygiene (SPF, DMARC, CAA present?)
-- **Ports** — a bounded common-service probe by plain TCP `connect()` (no SYN
-  tricks, no payloads, no range/CIDR sweeps)
-- **TLS** — certificate expiry, issuer, self-signed, deprecated protocol (TLS 1.0/1.1)
-- **HTTP hygiene** — status, Server banner (framed), missing security headers
-  (HSTS, CSP, X-Frame-Options, …)
+- **Ports** — a bounded common-service probe by plain TCP `connect()` with **real
+  states** (open / closed / filtered / unreachable), no SYN tricks, no payloads,
+  no range/CIDR sweeps.
+- **Passive service fingerprinting** — reads the banner a service *volunteers* on
+  connect (SSH, SMTP, FTP, POP3, IMAP) to identify product + version (framed). It
+  never sends a probe.
+- **TLS** — the full set of **accepted** protocol versions (not just the
+  negotiated one), chain trust against the system store, RSA key size, certificate
+  expiry/issuer/self-signed.
+- **HTTP hygiene** — status, Server banner (framed), security headers, **cookie
+  flags** (Secure/HttpOnly/SameSite), **CORS** wildcard, and HTTP→HTTPS redirect.
+
+Findings that name a detected service+version suggest checking it against a CVE
+feed — voyager-net detects the version; **CVE *matching* stays a lookup, and CVE
+*probing* (Nuclei &c.) is out of scope** — that is active testing, a separate,
+more-gated capability, not a read-only sense.
 
 Each finding carries a **severity**, **confidence**, and a **described fix** — e.g.
 "certificate expires in 6d → renew and automate ACME", "mysql reachable publicly →

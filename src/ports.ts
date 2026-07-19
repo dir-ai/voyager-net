@@ -1,5 +1,6 @@
 import net from 'node:net'
-import type { PortResult } from './types.js'
+import { fingerprintBanner } from './fingerprint.js'
+import type { PortResult, PortState } from './types.js'
 
 // A small, common service set — enough to spot an exposed surface without
 // behaving like a scanner. NOT a full 65k sweep (that would be intrusive).
@@ -12,26 +13,48 @@ const SERVICE: Record<number, string> = {
   8443: 'https-alt', 9200: 'elasticsearch', 27017: 'mongodb',
 }
 
-/** A single TCP connect() probe — the read-only, non-intrusive way to tell if a
- *  port accepts connections. No raw sockets, no SYN tricks, no payloads. */
+// Ports that only speak after WE send bytes (HTTP) or are binary/TLS — don't wait
+// for a volunteered banner there; dedicated inspectors (tls/http) handle them.
+const NO_PASSIVE_BANNER = new Set([80, 443, 8080, 8443, 3000, 6379, 3306, 5432, 27017, 9200])
+
+/**
+ * A single TCP connect() probe — the read-only way to tell if a port accepts
+ * connections. Distinguishes the REAL state (Codex #1): open / closed (refused) /
+ * filtered (dropped → timeout) / unreachable (no route). On open, PASSIVELY reads
+ * a volunteered banner (we send nothing) for a short window, then closes.
+ */
 function probe(host: string, port: number, timeoutMs: number): Promise<PortResult> {
   return new Promise((resolve) => {
     const sock = new net.Socket()
     let settled = false
-    const done = (open: boolean) => {
+    let banner = ''
+    const finish = (state: PortState) => {
       if (settled) return
       settled = true
+      const service = SERVICE[port]
+      const fp = state === 'open' && banner ? fingerprintBanner(banner, port) : undefined
       sock.destroy()
-      resolve({ port, open, service: open ? SERVICE[port] : undefined })
+      resolve({ port, state, open: state === 'open', service, banner: fp?.banner, product: fp?.product, version: fp?.version })
     }
     sock.setTimeout(timeoutMs)
-    sock.once('connect', () => done(true))
-    sock.once('timeout', () => done(false))
-    sock.once('error', () => done(false))
+    sock.once('timeout', () => finish('filtered')) // dropped packets → filtered
+    sock.once('error', (e: NodeJS.ErrnoException) => {
+      finish(e.code === 'ECONNREFUSED' ? 'closed' : e.code === 'EHOSTUNREACH' || e.code === 'ENETUNREACH' ? 'unreachable' : 'closed')
+    })
+    sock.once('connect', () => {
+      if (NO_PASSIVE_BANNER.has(port)) return finish('open')
+      // Passive: send NOTHING; give the server a brief moment to volunteer a banner.
+      const bannerTimer = setTimeout(() => finish('open'), Math.min(1500, timeoutMs))
+      sock.on('data', (d: Buffer) => {
+        banner += d.toString('latin1')
+        if (banner.length >= 512) { clearTimeout(bannerTimer); finish('open') }
+      })
+      sock.once('end', () => { clearTimeout(bannerTimer); finish('open') })
+    })
     try {
       sock.connect(port, host)
     } catch {
-      done(false)
+      finish('closed')
     }
   })
 }

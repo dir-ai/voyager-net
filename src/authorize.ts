@@ -42,6 +42,16 @@ export function parseTarget(input: string): TargetDecision {
   return { ok: false, host: null, kind: 'invalid', scope: 'unknown', reason: `not a valid single host or domain: ${host}` }
 }
 
+// A metadata/link-local IP a domain RESOLVES to → a DNS-rebinding attempt to
+// reach the instance metadata service. Checked AFTER resolution, not just on the
+// literal target. Returns a reason if the resolved IP must not be probed.
+const BLOCKED_IPS = new Set(['169.254.169.254', 'fd00:ec2::254', '100.100.100.200'])
+export function blockedIpReason(ip: string): string | null {
+  if (BLOCKED_IPS.has(ip)) return 'resolved to a cloud metadata endpoint (DNS-rebinding to metadata is blocked)'
+  if (/^169\.254\./.test(ip) || /^fe80:/i.test(ip)) return 'resolved to a link-local address'
+  return null
+}
+
 function ipScope(ip: string, ver: number): TargetDecision['scope'] {
   if (ver === 4) {
     if (ip === '127.0.0.1' || ip.startsWith('127.')) return 'loopback'

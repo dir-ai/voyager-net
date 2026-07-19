@@ -42,14 +42,20 @@ const SEV: Record<string, string> = { critical: '⛔', high: '⛔', medium: '⚠
 function render(b: NetBrief): void {
   if (b.error) { console.error(`✗ ${b.error}`); return }
   console.log(`\n${b.summary}`)
-  console.log(`  scope: ${b.target.scope} · confidence: ${b.confidence} · ${b.sanitization.framedFields} framed field(s)`)
+  console.log(`  scope: ${b.target.scope}${b.resolvedIp && b.resolvedIp !== b.target.host ? ` · pinned ${b.resolvedIp}` : ''} · confidence: ${b.confidence} · ${b.sanitization.framedFields} framed`)
 
-  const open = b.ports.filter((p) => p.open)
-  if (open.length) console.log(`\nopen ports: ${open.map((p) => `${p.port}${p.service ? `/${p.service}` : ''}`).join(', ')}`)
-  for (const c of b.tls) console.log(`  tls :${c.port} ${c.protocol ?? '?'} · issuer ${c.issuer ?? '?'} · expires ${c.validTo ?? '?'}${c.daysToExpiry != null ? ` (${c.daysToExpiry}d)` : ''}`)
+  const open = b.ports.filter((p) => p.state === 'open')
+  const filtered = b.ports.filter((p) => p.state === 'filtered').length
+  if (open.length) {
+    console.log(`\nopen ports:`)
+    for (const p of open) console.log(`  :${p.port} ${p.service ?? '?'}${p.product ? ` · ${p.product}${p.version ? ` ${p.version}` : ''}` : ''}`)
+  }
+  if (filtered) console.log(`  (${filtered} filtered/firewalled)`)
+  for (const c of b.tls) console.log(`  tls :${c.port} negotiated ${c.protocol ?? '?'} · accepts [${c.supportedProtocols.join(', ')}] · ${c.trusted ? 'trusted' : 'UNTRUSTED'}${c.keyBits ? ` · ${c.keyBits}-bit RSA` : ''} · expires ${c.validTo?.slice(0, 12) ?? '?'}${c.daysToExpiry != null ? ` (${c.daysToExpiry}d)` : ''}`)
   for (const h of b.http) {
     const missing = Object.entries(h.securityHeaders).filter(([, v]) => !v).map(([k]) => k)
-    console.log(`  http :${h.port} ${h.status ?? '?'}${h.server ? ` · ${h.server}` : ''}${missing.length ? ` · missing: ${missing.join(', ')}` : ''}`)
+    const cook = h.cookies ? ` · cookie[${[h.cookies.secure && 'Secure', h.cookies.httpOnly && 'HttpOnly', h.cookies.sameSite && 'SameSite'].filter(Boolean).join(',') || 'no-flags'}]` : ''
+    console.log(`  http :${h.port} ${h.status ?? '?'}${h.server ? ` · ${h.server}` : ''}${h.cors === '*' ? ' · CORS:*' : ''}${cook}${missing.length ? ` · missing: ${missing.join(', ')}` : ''}`)
   }
   if (b.dns) console.log(`\ndns: A ${b.dns.a.length}, MX ${b.dns.mx.length}, SPF ${b.dns.hasSpf ? '✓' : '✗'}, DMARC ${b.dns.hasDmarc ? '✓' : '✗'}, CAA ${b.dns.hasCaa ? '✓' : '✗'}`)
 
@@ -61,6 +67,10 @@ function render(b: NetBrief): void {
     }
   } else {
     console.log(`\n✓ no findings`)
+  }
+  if (b.suggestedNextProbes.length) {
+    console.log(`\nnext probes:`)
+    for (const s of b.suggestedNextProbes) console.log(`  → ${s}`)
   }
 }
 

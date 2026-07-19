@@ -17,11 +17,22 @@ export interface NetFinding {
   confidence: Confidence
 }
 
+/** Codex #1: a real port state, not just open/closed — the agent must tell a
+ *  firewalled/filtered port apart from a refused one apart from an unreachable host. */
+export type PortState = 'open' | 'closed' | 'filtered' | 'unreachable'
+
 export interface PortResult {
   port: number
+  state: PortState
+  /** Convenience: state === 'open'. */
   open: boolean
+  /** Guessed from the port number (weak). */
   service?: string
-  /** Server/product banner if volunteered — FRAMED (untrusted). */
+  /** PASSIVELY identified product from the volunteered banner — FRAMED. */
+  product?: string
+  /** Version parsed from the banner, when the service volunteers it. */
+  version?: string
+  /** The raw volunteered banner — FRAMED (untrusted), bounded. */
   banner?: string
 }
 
@@ -36,6 +47,11 @@ export interface TlsInfo {
   validTo: string | null
   daysToExpiry: number | null
   selfSigned: boolean | null
+  /** Which TLS versions the endpoint ACCEPTS (probed, not just the negotiated one). */
+  supportedProtocols: string[]
+  /** Does the chain validate against the system trust store for this hostname? */
+  trusted: boolean | null
+  keyBits: number | null
 }
 
 export interface DnsInfo {
@@ -57,10 +73,19 @@ export interface HttpSurface {
   server: string | null
   /** Security headers present/absent. */
   securityHeaders: Record<string, boolean>
+  /** Set-Cookie flags on any cookie the root sets. */
+  cookies: { secure: boolean; httpOnly: boolean; sameSite: boolean } | null
+  /** Access-Control-Allow-Origin value — a wildcard is a finding. */
+  cors: string | null
+  /** An http:// root that 301/302s to https://. */
+  redirectsToHttps: boolean
 }
 
 export interface NetBrief {
   target: { input: string; host: string | null; kind: 'ip' | 'domain' | 'invalid'; scope: 'loopback' | 'private' | 'public' | 'unknown' }
+  /** The single IP the domain resolved to and that ALL probes were pinned to
+   *  (anti DNS-rebinding: we resolve once and never re-resolve mid-scan). */
+  resolvedIp: string | null
   authorized: boolean
   summary: string
   dns: DnsInfo | null
@@ -69,6 +94,8 @@ export interface NetBrief {
   http: HttpSurface[]
   findings: NetFinding[]
   confidence: Confidence
+  /** What to probe next to deepen understanding — toward the universal contract. */
+  suggestedNextProbes: string[]
   sanitization: { framedFields: number }
   notes: string[]
   /** Set when the scan could not run (not authorized, invalid/blocked target,
