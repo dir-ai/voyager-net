@@ -1,0 +1,66 @@
+{
+  "name": "@dir-ai/voyager-net",
+  "version": "0.1.0",
+  "description": "Voyager's network organ: an AI agent's safe, read-only, AUTHORIZED introspection of your own hosts/infra — DNS, ports, TLS, HTTP hygiene — with findings, confidence, and described (never applied) fixes.",
+  "type": "module",
+  "license": "MIT",
+  "author": "dir-ai",
+  "homepage": "https://github.com/dir-ai/voyager-net#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dir-ai/voyager-net.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dir-ai/voyager-net/issues"
+  },
+  "keywords": [
+    "ai-agents",
+    "network-introspection",
+    "infrastructure",
+    "security-audit",
+    "tls",
+    "dns",
+    "mcp",
+    "model-context-protocol",
+    "voyager"
+  ],
+  "mcpName": "io.github.dir-ai/voyager-net",
+  "bin": {
+    "voyager-net": "dist/cli.js",
+    "voyager-net-mcp": "dist/mcp.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "server.json",
+    "README.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build",
+    "test": "npm run build && tsc -p tsconfig.test.json && node --test scripts/run-tests.mjs"
+  },
+  "dependencies": {
+    "@dir-ai/voyager": "^1.1.1",
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.5.0"
+  }
+}
