@@ -5,7 +5,7 @@
 // DESCRIBES a fix. It never applies a fix, never exploits, never scans ranges —
 // remediation ("the hands") is a separate, consent-gated organ.
 export { scan } from './scan.js'
-export { parseTarget } from './authorize.js'
+export { parseTarget, blockedIpReason } from './authorize.js'
 export { DEFAULT_PORTS } from './ports.js'
 export { VERSION } from './version.js'
 export type {

@@ -54,9 +54,12 @@ function render(b: NetBrief): void {
   for (const c of b.tls) console.log(`  tls :${c.port} negotiated ${c.protocol ?? '?'} · accepts [${c.supportedProtocols.join(', ')}] · ${c.trusted ? 'trusted' : 'UNTRUSTED'}${c.keyBits ? ` · ${c.keyBits}-bit RSA` : ''} · expires ${c.validTo?.slice(0, 12) ?? '?'}${c.daysToExpiry != null ? ` (${c.daysToExpiry}d)` : ''}`)
   for (const h of b.http) {
     const missing = Object.entries(h.securityHeaders).filter(([, v]) => !v).map(([k]) => k)
-    const cook = h.cookies ? ` · cookie[${[h.cookies.secure && 'Secure', h.cookies.httpOnly && 'HttpOnly', h.cookies.sameSite && 'SameSite'].filter(Boolean).join(',') || 'no-flags'}]` : ''
-    console.log(`  http :${h.port} ${h.status ?? '?'}${h.server ? ` · ${h.server}` : ''}${h.cors === '*' ? ' · CORS:*' : ''}${cook}${missing.length ? ` · missing: ${missing.join(', ')}` : ''}`)
+    const weakCookies = h.cookies.filter((c) => !c.secure || !c.httpOnly)
+    const cook = h.cookies.length ? ` · cookies[${h.cookies.length}${weakCookies.length ? `, ${weakCookies.length} weak` : ' ok'}]` : ''
+    const cors = h.cors === '*' ? ' · CORS:*' : h.cors && h.corsCredentials ? ' · CORS+creds' : ''
+    console.log(`  http :${h.port} ${h.status ?? '?'}${h.server ? ` · ${h.server}` : ''}${cors}${cook}${missing.length ? ` · missing: ${missing.join(', ')}` : ''}`)
   }
+  if (b.notes.length) for (const n of b.notes) console.log(`  \x1b[33m! ${n}\x1b[0m`)
   if (b.dns) console.log(`\ndns: A ${b.dns.a.length}, MX ${b.dns.mx.length}, SPF ${b.dns.hasSpf ? '✓' : '✗'}, DMARC ${b.dns.hasDmarc ? '✓' : '✗'}, CAA ${b.dns.hasCaa ? '✓' : '✗'}`)
 
   if (b.findings.length) {

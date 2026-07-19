@@ -63,6 +63,9 @@ export interface DnsInfo {
   hasSpf: boolean
   hasDmarc: boolean
   hasCaa: boolean
+  /** Raw SPF / DMARC records (for content grading: +all, p=none). */
+  spf: string | null
+  dmarc: string | null
 }
 
 export interface HttpSurface {
@@ -73,10 +76,14 @@ export interface HttpSurface {
   server: string | null
   /** Security headers present/absent. */
   securityHeaders: Record<string, boolean>
-  /** Set-Cookie flags on any cookie the root sets. */
-  cookies: { secure: boolean; httpOnly: boolean; sameSite: boolean } | null
-  /** Access-Control-Allow-Origin value — a wildcard is a finding. */
+  /** Raw values of key security headers (for quality grading). FRAMED. */
+  headerValues: { hsts: string | null; csp: string | null }
+  /** EACH Set-Cookie evaluated individually (a blob join would mask a bad one). */
+  cookies: Array<{ name: string; secure: boolean; httpOnly: boolean; sameSite: boolean }>
+  /** Access-Control-Allow-Origin value — FRAMED (target-controlled). */
   cors: string | null
+  /** Access-Control-Allow-Credentials: true (dangerous combined with a set ACAO). */
+  corsCredentials: boolean
   /** An http:// root that 301/302s to https://. */
   redirectsToHttps: boolean
 }

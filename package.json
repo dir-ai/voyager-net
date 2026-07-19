@@ -1,6 +1,6 @@
 {
   "name": "@dir-ai/voyager-net",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Voyager's network organ: an AI agent's safe, read-only, AUTHORIZED introspection of your own hosts/infra — DNS, ports, TLS, HTTP hygiene — with findings, confidence, and described (never applied) fixes.",
   "type": "module",
   "license": "MIT",
@@ -57,7 +57,8 @@
   },
   "dependencies": {
     "@dir-ai/voyager": "^1.1.1",
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ipaddr.js": "^2.2.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

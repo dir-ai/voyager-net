@@ -39,7 +39,17 @@ function probe(host: string, port: number, timeoutMs: number): Promise<PortResul
     sock.setTimeout(timeoutMs)
     sock.once('timeout', () => finish('filtered')) // dropped packets → filtered
     sock.once('error', (e: NodeJS.ErrnoException) => {
-      finish(e.code === 'ECONNREFUSED' ? 'closed' : e.code === 'EHOSTUNREACH' || e.code === 'ENETUNREACH' ? 'unreachable' : 'closed')
+      // ECONNREFUSED = actively closed; host/net-unreach = no route; a timeout/reset
+      // at the OS level (ETIMEDOUT) means the packet was dropped → filtered, NOT closed.
+      finish(
+        e.code === 'ECONNREFUSED'
+          ? 'closed'
+          : e.code === 'EHOSTUNREACH' || e.code === 'ENETUNREACH'
+            ? 'unreachable'
+            : e.code === 'ETIMEDOUT'
+              ? 'filtered'
+              : 'closed',
+      )
     })
     sock.once('connect', () => {
       if (NO_PASSIVE_BANNER.has(port)) return finish('open')

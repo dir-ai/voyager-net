@@ -56,11 +56,19 @@ export async function scan(input: string, opts: ScanOptions = {}): Promise<NetBr
   const open = portResults.filter((p) => p.state === 'open')
 
   log('inspecting TLS + HTTP…')
-  const tlsInfos = (await Promise.all(open.filter((p) => TLS_PORTS.has(p.port)).map((p) => inspectTls(pin, p.port, host, timeoutMs + 3000)))).filter(Boolean) as NonNullable<Awaited<ReturnType<typeof inspectTls>>>[]
-  const httpInfos = (await Promise.all(open.filter((p) => HTTP_PORTS.has(p.port) || HTTPS_PORTS.has(p.port)).map((p) => inspectHttp(host, p.port, HTTPS_PORTS.has(p.port), timeoutMs + 3000)))).filter(Boolean) as NonNullable<Awaited<ReturnType<typeof inspectHttp>>>[]
+  const openTlsPorts = open.filter((p) => TLS_PORTS.has(p.port))
+  const openHttpPorts = open.filter((p) => HTTP_PORTS.has(p.port) || HTTPS_PORTS.has(p.port))
+  // BOTH TLS and HTTP connect to the PINNED IP (host only for SNI/Host header),
+  // so nothing re-resolves the name mid-scan (anti-rebinding holds end to end).
+  const tlsInfos = (await Promise.all(openTlsPorts.map((p) => inspectTls(pin, p.port, host, timeoutMs + 3000)))).filter(Boolean) as NonNullable<Awaited<ReturnType<typeof inspectTls>>>[]
+  const httpInfos = (await Promise.all(openHttpPorts.map((p) => inspectHttp(pin, host, p.port, HTTPS_PORTS.has(p.port), timeoutMs + 3000)))).filter(Boolean) as NonNullable<Awaited<ReturnType<typeof inspectHttp>>>[]
 
   // ── Findings ────────────────────────────────────────────────────────────────
   const findings: NetFinding[] = []
+  const notes: string[] = []
+  // Honesty: an OPEN port whose TLS/HTTP inspection failed is UNKNOWN, not clean.
+  if (tlsInfos.length < openTlsPorts.length) notes.push(`${openTlsPorts.length - tlsInfos.length} open TLS port(s) could not be inspected (handshake failed/timed out) — TLS posture there is UNKNOWN, not clean`)
+  if (httpInfos.length < openHttpPorts.length) notes.push(`${openHttpPorts.length - httpInfos.length} open HTTP port(s) could not be inspected — header posture there is UNKNOWN`)
 
   for (const p of open) {
     if (SENSITIVE[p.port]) {
@@ -76,29 +84,64 @@ export async function scan(input: string, opts: ScanOptions = {}): Promise<NetBr
     if (weak.length) findings.push({ severity: 'high', kind: 'weak-tls', detail: `accepts deprecated ${weak.join(' + ')}`, at: `${host}:${c.port}`, suggestedFix: 'disable TLS 1.0/1.1; require TLS 1.2+ (ideally 1.3)', confidence: 'strong' })
     if (c.daysToExpiry != null && c.daysToExpiry < 0) findings.push({ severity: 'critical', kind: 'tls-expired', detail: `certificate EXPIRED ${-c.daysToExpiry}d ago`, at: `${host}:${c.port}`, suggestedFix: 'renew the certificate immediately (ACME)', confidence: 'strong' })
     else if (c.daysToExpiry != null && c.daysToExpiry < 21) findings.push({ severity: c.daysToExpiry < 7 ? 'high' : 'medium', kind: 'tls-expiring', detail: `certificate expires in ${c.daysToExpiry}d`, at: `${host}:${c.port}`, suggestedFix: 'renew now and automate renewal (ACME)', confidence: 'strong' })
-    if (c.trusted === false && c.selfSigned) findings.push({ severity: 'medium', kind: 'tls-untrusted', detail: 'certificate not trusted by the system store (self-signed)', at: `${host}:${c.port}`, suggestedFix: 'use a CA-issued certificate for a public endpoint', confidence: 'moderate' })
-    if (c.keyBits != null && c.keyBits > 0 && c.keyBits < 2048) findings.push({ severity: 'medium', kind: 'weak-key', detail: `${c.keyBits}-bit key (below 2048)`, at: `${host}:${c.port}`, suggestedFix: 'reissue with a ≥2048-bit RSA or an EC key', confidence: 'strong' })
+    // Emit whenever the chain fails validation — self-signed is just one reason;
+    // untrusted CA / incomplete chain / name mismatch also matter and were silent.
+    if (c.trusted === false) findings.push({ severity: 'medium', kind: 'tls-untrusted', detail: c.selfSigned ? 'certificate not trusted by the system store (self-signed)' : 'certificate chain does not validate against the system trust store (untrusted CA, incomplete chain, or name mismatch)', at: `${host}:${c.port}`, suggestedFix: 'use a CA-issued certificate with a complete chain matching the hostname', confidence: 'moderate' })
+    // Only RSA has the <2048 rule; EC/EdDSA keys have small bit counts BY DESIGN
+    // (nulled in tls.ts for named curves; the ≥512 floor also excludes Ed25519 ≈253).
+    if (c.keyBits != null && c.keyBits >= 512 && c.keyBits < 2048) findings.push({ severity: 'medium', kind: 'weak-key', detail: `${c.keyBits}-bit RSA key (below 2048)`, at: `${host}:${c.port}`, suggestedFix: 'reissue with a ≥2048-bit RSA or an EC key', confidence: 'strong' })
   }
 
   for (const h of httpInfos) {
-    if (h.url.startsWith('https') && !h.securityHeaders['strict-transport-security']) findings.push({ severity: 'medium', kind: 'missing-hsts', detail: 'HTTPS without HSTS', at: h.url, suggestedFix: 'add `Strict-Transport-Security: max-age=63072000; includeSubDomains`', confidence: 'strong' })
+    const isHttps = h.url.startsWith('https')
+    // HSTS — grade quality, not just presence.
+    if (isHttps && !h.securityHeaders['strict-transport-security']) findings.push({ severity: 'medium', kind: 'missing-hsts', detail: 'HTTPS without HSTS', at: h.url, suggestedFix: 'add `Strict-Transport-Security: max-age=63072000; includeSubDomains`', confidence: 'strong' })
+    else if (isHttps && h.headerValues.hsts) {
+      const maxAge = Number(/max-age\s*=\s*(\d+)/i.exec(h.headerValues.hsts)?.[1] ?? 0)
+      if (maxAge < 15_552_000 || !/includesubdomains/i.test(h.headerValues.hsts)) findings.push({ severity: 'low', kind: 'weak-hsts', detail: `HSTS is weak (${maxAge < 15_552_000 ? 'max-age below 180d' : 'no includeSubDomains'})`, at: h.url, suggestedFix: 'use max-age ≥ 63072000 with includeSubDomains (consider preload)', confidence: 'strong' })
+    }
+    // CORS — wildcard, or (the dangerous case) a reflected/specific origin WITH credentials.
     if (h.cors === '*') findings.push({ severity: 'medium', kind: 'cors-wildcard', detail: 'Access-Control-Allow-Origin: * (any origin)', at: h.url, suggestedFix: 'restrict CORS to the specific trusted origin(s)', confidence: 'strong' })
-    if (h.cookies && (!h.cookies.secure || !h.cookies.httpOnly)) findings.push({ severity: 'low', kind: 'weak-cookie', detail: `cookie missing ${[!h.cookies.secure && 'Secure', !h.cookies.httpOnly && 'HttpOnly'].filter(Boolean).join(' + ')}`, at: h.url, suggestedFix: 'set Secure + HttpOnly (and SameSite) on session cookies', confidence: 'strong' })
+    else if (h.cors && h.corsCredentials) findings.push({ severity: 'high', kind: 'cors-credentials', detail: `CORS allows credentials for origin "${h.cors}" — verify it cannot be reflected/attacker-controlled`, at: h.url, suggestedFix: 'never combine Allow-Credentials:true with a reflected or overly broad origin', confidence: 'moderate' })
+    // Cookies — evaluate EACH individually (a good cookie no longer masks a bad one).
+    for (const c of h.cookies) {
+      if (!c.secure || !c.httpOnly) findings.push({ severity: 'low', kind: 'weak-cookie', detail: `cookie "${c.name}" missing ${[!c.secure && 'Secure', !c.httpOnly && 'HttpOnly'].filter(Boolean).join(' + ')}`, at: h.url, suggestedFix: 'set Secure + HttpOnly (and SameSite) on session cookies', confidence: 'strong' })
+    }
+    // CSP — grade quality.
     if (!h.securityHeaders['content-security-policy']) findings.push({ severity: 'low', kind: 'missing-csp', detail: 'no Content-Security-Policy', at: h.url, suggestedFix: 'add a Content-Security-Policy', confidence: 'moderate' })
+    else if (h.headerValues.csp) {
+      const c = h.headerValues.csp.toLowerCase()
+      const w: string[] = []
+      if (c.includes("'unsafe-inline'")) w.push('unsafe-inline')
+      if (c.includes("'unsafe-eval'")) w.push('unsafe-eval')
+      if (/(?:default|script)-src[^;]*\*(?![.\w-])/.test(c)) w.push('wildcard-src')
+      if (w.length) findings.push({ severity: 'low', kind: 'weak-csp', detail: `CSP present but weak: ${w.join(', ')}`, at: h.url, suggestedFix: "remove unsafe-inline/unsafe-eval and wildcard sources", confidence: 'moderate' })
+    }
+    // Clickjacking + version leak.
+    if (isHttps && !h.securityHeaders['x-frame-options'] && !/frame-ancestors/i.test(h.headerValues.csp ?? '')) findings.push({ severity: 'low', kind: 'missing-frame-protection', detail: 'no clickjacking protection (X-Frame-Options / CSP frame-ancestors)', at: h.url, suggestedFix: "add X-Frame-Options: DENY or CSP frame-ancestors 'none'", confidence: 'moderate' })
+    if (h.server && /\d/.test(h.server)) findings.push({ severity: 'low', kind: 'version-leak', detail: `server version disclosed in header: ${h.server}`, at: h.url, suggestedFix: 'remove version details from the Server header', confidence: 'moderate' })
   }
   for (const h of httpInfos) if (h.url.startsWith('http://') && !h.redirectsToHttps) findings.push({ severity: 'low', kind: 'no-https-redirect', detail: 'plain HTTP does not redirect to HTTPS', at: h.url, suggestedFix: 'redirect all HTTP to HTTPS (301)', confidence: 'strong' })
 
   if (dns) {
     if (dns.mx.length && !dns.hasSpf) findings.push({ severity: 'medium', kind: 'missing-spf', detail: 'sends mail (MX) but no SPF record', at: host, suggestedFix: 'publish an SPF TXT record', confidence: 'strong' })
+    else if (dns.spf && /\+all\b/i.test(dns.spf)) findings.push({ severity: 'high', kind: 'spf-permissive', detail: 'SPF contains +all — anyone may send as this domain', at: host, suggestedFix: 'end SPF with -all (fail) or ~all (softfail), never +all', confidence: 'strong' })
     if (dns.mx.length && !dns.hasDmarc) findings.push({ severity: 'medium', kind: 'missing-dmarc', detail: 'no DMARC record', at: host, suggestedFix: 'publish `v=DMARC1; p=quarantine; …`', confidence: 'strong' })
+    else if (dns.dmarc && /p=none/i.test(dns.dmarc)) findings.push({ severity: 'low', kind: 'dmarc-none', detail: 'DMARC policy is p=none (monitor only — no enforcement)', at: host, suggestedFix: 'move DMARC to p=quarantine then p=reject once aligned', confidence: 'strong' })
     if (!dns.hasCaa) findings.push({ severity: 'low', kind: 'missing-caa', detail: 'no CAA record — any CA may issue certs', at: host, suggestedFix: 'add a CAA record pinning your CA(s)', confidence: 'moderate' })
   }
 
   // ── Summary + confidence + next probes ──────────────────────────────────────
   const worst = ['critical', 'high', 'medium', 'low', 'info'].find((s) => findings.some((f) => f.severity === s))
+  const ipTag = resolvedIp && resolvedIp !== host ? ` (${resolvedIp})` : ''
+  const partial = notes.length > 0
   const summary = findings.length
-    ? `${host}${resolvedIp && resolvedIp !== host ? ` (${resolvedIp})` : ''} — ${findings.length} finding(s); worst: ${worst}. ${open.length} open port(s).`
-    : `${host} — no issues across ${ports.length} ports${dns ? ' + DNS' : ''}. ${open.length} open port(s).`
+    ? `${host}${ipTag} — ${findings.length} finding(s); worst: ${worst}. ${open.length} open port(s).${partial ? ' Some open ports could not be inspected (posture PARTIAL).' : ''}`
+    : partial
+      ? `${host}${ipTag} — ${open.length} open port(s) but some could not be inspected; posture PARTIAL/UNKNOWN, not necessarily clean.`
+      : open.length === 0 && !dns
+        ? `${host}${ipTag} — nothing observable (no open ports, no DNS records).`
+        : `${host}${ipTag} — no issues across ${ports.length} ports${dns ? ' + DNS' : ''}. ${open.length} open port(s).`
 
   const framedFields = tlsInfos.length + httpInfos.filter((h) => h.server).length + open.filter((p) => p.banner).length
   const signals = [dns != null, open.length > 0, tlsInfos.length > 0].filter(Boolean).length
@@ -114,6 +157,6 @@ export async function scan(input: string, opts: ScanOptions = {}): Promise<NetBr
   return {
     target: { input, host, kind: t.kind, scope: t.scope }, resolvedIp,
     authorized: true, summary, dns, ports: portResults, tls: tlsInfos, http: httpInfos, findings,
-    confidence, suggestedNextProbes, sanitization: { framedFields }, notes: [],
+    confidence, suggestedNextProbes, sanitization: { framedFields }, notes,
   }
 }

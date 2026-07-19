@@ -52,7 +52,7 @@ export async function inspectTls(ip: string, port: number, servername: string, t
       try {
         const cert = socket.getPeerCertificate(false)
         const validTo = cert?.valid_to ? new Date(cert.valid_to) : null
-        const days = validTo && !isNaN(validTo.getTime()) ? Math.round((validTo.getTime() - Date.now()) / 86_400_000) : null
+        const days = validTo && !isNaN(validTo.getTime()) ? Math.floor((validTo.getTime() - Date.now()) / 86_400_000) : null
         const issuerCN = cert?.issuer?.CN ? stripInjection(String(cert.issuer.CN)) : null
         const subjectCN = cert?.subject?.CN ? stripInjection(String(cert.subject.CN)) : null
         finish({
