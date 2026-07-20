@@ -1,6 +1,6 @@
 {
   "name": "@dir-ai/voyager-net",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Voyager's network organ: an AI agent's safe, read-only, AUTHORIZED introspection of your own hosts/infra — DNS, ports, TLS, HTTP hygiene — with findings, confidence, and described (never applied) fixes.",
   "type": "module",
   "license": "MIT",

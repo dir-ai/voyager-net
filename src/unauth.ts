@@ -80,7 +80,21 @@ const PROBES: UnauthProbe[] = [
   // a gRPC server replies with a SETTINGS frame (type 0x04 at offset 3). Port-scoped so a
   // normal HTTP/2 web server elsewhere isn't mislabelled. The 5th major vector DB (Kimi #2).
   { service: 'Milvus (vector DB, gRPC)', ports: [19530], fp: /milvus/i, send: Buffer.from('PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00', 'latin1'), exposed: (r) => r.length >= 5 && r.charCodeAt(3) === 0x04, authRequired: () => false },
+  // ── Kimi round-6 #3: three services that answer anyone ─────────────────────
+  { service: 'rsync daemon', ports: [873], fp: /rsync/i, darkEligible: true, send: null, exposed: (r) => /@RSYNCD:/.test(r), authRequired: () => false },
+  { service: 'Apache Kafka', ports: [9092], fp: /kafka/i, darkEligible: true, send: kafkaApiVersions(), exposed: (r) => r.length >= 8 && r.charCodeAt(4) === 0x00 && r.charCodeAt(5) === 0x00 && r.charCodeAt(6) === 0x00 && r.charCodeAt(7) === 0x01, authRequired: () => false },
+  { service: 'Apache Solr', ports: [8983], fp: /solr/i, darkEligible: true, send: HTTP_GET('/solr/admin/info/system?wt=json'), exposed: (r) => /"lucene"|"solr-spec-version"|"solr_home"/.test(r), authRequired: (r) => /\b401\b|\b403\b/.test(r) },
 ]
+
+/** A Kafka ApiVersions (key 18, v0) request with correlationId 1 and empty client-id.
+ *  A real broker echoes correlationId 1 in the response — reachable/no-auth signal. */
+function kafkaApiVersions(): Buffer {
+  const body = Buffer.from([0x00, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]) // apiKey=18, ver=0, corrId=1, clientId=""
+  const framed = Buffer.alloc(4 + body.length)
+  framed.writeUInt32BE(body.length, 0)
+  body.copy(framed, 4)
+  return framed
+}
 
 /** A minimal MQTT v3.1.1 CONNECT packet (clean session, client-id "voyager"). An
  *  anonymous broker replies CONNACK with return code 0x00 (accepted). */
@@ -119,7 +133,7 @@ export async function scanUnauth(pin: string, host: string, open: PortResult[], 
     const exact = PROBES.filter((pr) => pr.ports.includes(p.port) || (id && pr.fp?.test(id)) || (isHttp && isHttpProbe(pr)))
     const darkOnly = isDark ? PROBES.filter((pr) => pr.darkEligible && !exact.includes(pr)) : []
     const seen = new Set<string>()
-    const chosen = [...exact, ...darkOnly].filter((pr) => (seen.has(pr.service) ? false : (seen.add(pr.service), true))).slice(0, isDark || isHttp ? 18 : 5)
+    const chosen = [...exact, ...darkOnly].filter((pr) => (seen.has(pr.service) ? false : (seen.add(pr.service), true))).slice(0, isDark || isHttp ? 26 : 5)
     for (const probe of chosen) jobs.push(runProbe(pin, host, p.port, probe, timeoutMs))
   }
   const out = await Promise.all(jobs)

@@ -122,5 +122,7 @@ export interface ScanOptions {
   ports?: number[]
   /** Per-connection timeout ms. */
   timeoutMs?: number
+  /** Also probe UDP services (SNMP/NTP/DNS) — the connectionless "continent". Opt-in. */
+  udp?: boolean
   onLog?: (line: string) => void
 }
