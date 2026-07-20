@@ -53,7 +53,16 @@ export async function inspectTls(ip: string, port: number, servername: string, t
   const base = await new Promise<TlsInfo | null>((resolve) => {
     let settled = false
     const finish = (v: TlsInfo | null) => { if (!settled) { settled = true; resolve(v) } }
-    const socket = tls.connect({ host: ip, port, servername: sniOf(servername), rejectUnauthorized: false, timeout: timeoutMs }, () => {
+    // TOLERANT base handshake (Kimi Canto VI #21 — the reverse gate). A server that
+    // accepts ONLY TLS 1.0/1.1 (or only a legacy cipher) REFUSES a modern-default
+    // connect — and the old code did `if (!base) return null`, so the WORST server
+    // (legacy-only) became INVISIBLE: the protocol enumeration below never ran and no
+    // `weak-tls` finding fired. We now offer down to TLSv1 with SECLEVEL=0 so the base
+    // handshake SUCCEEDS against a legacy-only endpoint too. A modern server still
+    // negotiates its HIGHEST version (server preference wins; DEFAULT orders strong
+    // suites first), so the protocol/cipher we read is unchanged for it — only a
+    // legacy-only server now yields a (correctly bad) TlsInfo instead of nothing.
+    const socket = tls.connect({ host: ip, port, servername: sniOf(servername), rejectUnauthorized: false, minVersion: 'TLSv1', ciphers: 'DEFAULT@SECLEVEL=0', timeout: timeoutMs }, () => {
       try {
         const cert = socket.getPeerCertificate(false)
         const validTo = cert?.valid_to ? new Date(cert.valid_to) : null
