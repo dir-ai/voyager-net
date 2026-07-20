@@ -2,11 +2,24 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import net from 'node:net'
 import tls from 'node:tls'
+import http from 'node:http'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { scan, scanUnauth } from '../dist/index.js'
+import { scanFtp } from '../dist/ftp.js'
+import { scanRsyncModules } from '../dist/rsync.js'
+import { scanHttpExposure } from '../dist/httpexpose.js'
+
+/** Generate a throwaway self-signed cert, or null if openssl is unavailable. */
+function makeCert(): { key: Buffer; cert: Buffer } | null {
+  try {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-'))
+    execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-keyout', join(dir, 'k'), '-out', join(dir, 'c'), '-days', '1', '-nodes', '-subj', '/CN=localhost'], { stdio: 'ignore' })
+    return { key: readFileSync(join(dir, 'k')), cert: readFileSync(join(dir, 'c')) }
+  } catch { return null }
+}
 
 const bind = (srv: net.Server): Promise<number> => new Promise((r) => srv.listen(0, '127.0.0.1', () => r((srv.address() as net.AddressInfo).port)))
 
@@ -57,4 +70,52 @@ test('TLS reverse-gate: a server accepting ONLY TLS 1.0 still fires weak-tls (no
     const b = await scan('127.0.0.1', { authorized: true, ports: [tp], timeoutMs: 3000 })
     assert.ok(b.findings.some((f) => f.kind === 'weak-tls'), 'weak-tls fired on a TLS-1.0-only server (reverse gate closed)')
   } finally { srv.close() }
+})
+
+// Kimi Canto VI #36: a service that speaks ONLY over TLS (k8s API :6443) was invisible
+// because the unauth probes only spoke cleartext. TLS-wrapped probes now reach it.
+test('unauth TLS-aware: a Kubernetes API behind TLS is caught (probe wrapped in TLS)', async () => {
+  const c = makeCert(); if (!c) return // openssl unavailable → soft-skip
+  const k8s = tls.createServer({ key: c.key, cert: c.cert }, (s) => {
+    s.on('error', () => {})
+    s.on('data', () => s.end('HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{"major":"1","gitVersion":"v1.29.0","buildDate":"2026-01-01T00:00:00Z","platform":"linux/amd64"}'))
+  }); k8s.on('error', () => {})
+  const tp = await bind(k8s)
+  try {
+    const f = await scanUnauth('127.0.0.1', 'h', [{ port: tp, state: 'open', open: true }], 3000, new Set([tp]), new Set(), new Set([tp]))
+    assert.ok(f.some((x) => /Kubernetes/i.test(x.detail) && x.kind === 'unauthenticated-service'), 'k8s-over-TLS detected via a TLS-wrapped probe')
+  } finally { k8s.close() }
+})
+
+// Kimi Canto VI #34: FTP anonymous login (USER anonymous → 230), not just the version.
+test('scanFtp: anonymous FTP login (USER anonymous → 230) is flagged', async () => {
+  const ftp = net.createServer((s) => {
+    s.on('error', () => {}); s.write('220 Test FTP ready\r\n')
+    s.on('data', (d) => { const t = d.toString(); if (/USER/i.test(t)) s.write('331 password please\r\n'); else if (/PASS/i.test(t)) s.write('230 Login successful.\r\n'); else if (/QUIT/i.test(t)) s.end('221 Bye\r\n') })
+  }); ftp.on('error', () => {})
+  const fp = await bind(ftp)
+  try { assert.ok((await scanFtp('127.0.0.1', 'h', fp, 2500)).some((x) => x.kind === 'ftp-anonymous')) } finally { ftp.close() }
+})
+
+// Kimi Canto VI #31 (deep): rsync module ENUMERATION beyond the banner.
+test('scanRsyncModules: an rsync daemon that lists anonymous modules is flagged', async () => {
+  const rsync = net.createServer((s) => {
+    s.on('error', () => {}); s.write('@RSYNCD: 31.0\n')
+    s.on('data', () => s.write('share1\tPublic share\nbackups\tNightly backups\n@RSYNCD: EXIT\n'))
+  }); rsync.on('error', () => {})
+  const rp = await bind(rsync)
+  try {
+    const f = await scanRsyncModules('127.0.0.1', 'h', rp, 2500)
+    assert.ok(f.some((x) => x.kind === 'rsync-anonymous-module' && /share1/.test(x.detail)))
+  } finally { rsync.close() }
+})
+
+// Kimi Canto VI #35: Apache mod_status (/server-status) world-readable.
+test('scanHttpExposure: Apache /server-status world-readable is flagged', async () => {
+  const web = http.createServer((req, res) => {
+    if ((req.url ?? '').startsWith('/server-status')) { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('Total Accesses: 42\nBusyWorkers: 1\nScoreboard: ____W____') }
+    else { res.writeHead(404); res.end('not found') }
+  }); web.on('error', () => {})
+  const wp = await bind(web)
+  try { assert.ok((await scanHttpExposure('127.0.0.1', 'h', wp, false, 2500)).some((x) => x.kind === 'apache-server-status')) } finally { web.close() }
 })

@@ -3,7 +3,7 @@ import https from 'node:https'
 import type { LookupFunction } from 'node:net'
 import { stripInjection } from '@dir-ai/voyager'
 import { defang } from './fingerprint.js'
-import { blockedIpReason } from './authorize.js'
+import { blockedMetadataReason } from './authorize.js'
 import type { HttpSurface } from './types.js'
 
 const SEC_HEADERS = [
@@ -60,7 +60,7 @@ export async function inspectHttp(pinnedIp: string, hostname: string, port: numb
   const url = `${secure ? 'https' : 'http'}://${hostname}:${port}/`
   const family = pinnedIp.includes(':') ? 6 : 4
   const lookup = ((_h: string, options: { all?: boolean } | number, cb: (...a: unknown[]) => void) => {
-    if (blockedIpReason(pinnedIp)) { cb(new Error(`pinned IP ${pinnedIp} blocked`)); return }
+    if (blockedMetadataReason(pinnedIp)) { cb(new Error(`pinned IP ${pinnedIp} blocked`)); return }
     if (typeof options === 'object' && options?.all === true) cb(null, [{ address: pinnedIp, family }])
     else cb(null, pinnedIp, family)
   }) as unknown as LookupFunction

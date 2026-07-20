@@ -112,6 +112,31 @@ export function blockedIpReason(ipStr: string): string | null {
   return null
 }
 
+/**
+ * A NARROWER guard for the already-vetted pinned request path (inspectHttp / path-
+ * exposure probes). The pin is the operator-AUTHORIZED target — which legitimately
+ * includes internal loopback/private hosts (Voyager audits hosts you OWN; Kimi's own
+ * benchmark lives on 127.0.0.1). Re-blocking every non-public IP there made HTTP
+ * hygiene + /server-status silently blind on internal targets. Since we PIN the IP
+ * (no re-resolution = no rebinding), we only still refuse the genuinely-dangerous
+ * SSRF surfaces: cloud metadata and link-local. loopback/private/ULA are allowed.
+ */
+export function blockedMetadataReason(ipStr: string): string | null {
+  let addr: ipaddr.IPv4 | ipaddr.IPv6
+  try {
+    addr = ipaddr.parse(ipStr)
+  } catch {
+    return `is an unparseable IP (${ipStr})`
+  }
+  if (addr.kind() === 'ipv6') {
+    const v6 = addr as ipaddr.IPv6
+    if (v6.isIPv4MappedAddress()) addr = v6.toIPv4Address()
+  }
+  if (METADATA_HOSTS.has(addr.toString())) return 'is a cloud metadata endpoint (SSRF/credential-theft surface)'
+  if (addr.range() === 'linkLocal') return 'is a link-local address (SSRF surface)'
+  return null
+}
+
 function ipScopeOf(ipStr: string): TargetDecision['scope'] {
   try {
     let addr = ipaddr.parse(ipStr)

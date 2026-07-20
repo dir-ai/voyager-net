@@ -12,6 +12,9 @@ import { inspectRdp, inspectTelnet } from './rdp.js'
 import { scanUdp } from './udp.js'
 import { inspectTls } from './tls.js'
 import { inspectHttp } from './http.js'
+import { scanFtp } from './ftp.js'
+import { scanHttpExposure } from './httpexpose.js'
+import { scanRsyncModules } from './rsync.js'
 import type { Confidence, NetBrief, NetFinding, ScanOptions } from './types.js'
 
 const HTTP_PORTS = new Set([80, 8080, 3000])
@@ -84,7 +87,7 @@ export async function scan(input: string, opts: ScanOptions = {}): Promise<NetBr
   // answer a benign protocol hello with NO auth? (Redis PING, Elastic GET, …) ────
   log('probing exposed services for missing authentication…')
   const inspected = new Set<number>([...tlsPorts, ...httpInfos.map((h) => h.port)])
-  const unauthFindings = await scanUnauth(pin, host, open, timeoutMs, inspected, new Set(httpInfos.map((h) => h.port)))
+  const unauthFindings = await scanUnauth(pin, host, open, timeoutMs, inspected, new Set(httpInfos.map((h) => h.port)), tlsPorts)
 
   // SSH weak-algorithm audit on any port speaking SSH (port 22 or fingerprinted).
   const sshPorts = open.filter((p) => p.port === 22 || /ssh/i.test(`${p.product ?? ''} ${p.service ?? ''}`))
@@ -98,12 +101,20 @@ export async function scan(input: string, opts: ScanOptions = {}): Promise<NetBr
   const udpFindings = opts.udp && t.kind !== 'invalid' ? await scanUdp(pin, host, timeoutMs) : []
   const telnetFindings = (await Promise.all(open.filter((p) => p.port === 23 || /telnet/i.test(`${p.product ?? ''} ${p.service ?? ''}`) || (!p.product && !inspected.has(p.port))).map((p) => inspectTelnet(pin, host, p.port, timeoutMs)))).flat()
 
+  // FTP anonymous-login check on port 21 / any FTP-fingerprinted port (Kimi #34).
+  const ftpFindings = (await Promise.all(open.filter((p) => p.port === 21 || /\bftp\b/i.test(`${p.product ?? ''} ${p.service ?? ''} ${p.banner ?? ''}`)).map((p) => scanFtp(pin, host, p.port, timeoutMs + 1000)))).flat()
+  // rsync module enumeration on port 873 / any rsync-fingerprinted port (Kimi #31).
+  const rsyncFindings = (await Promise.all(open.filter((p) => p.port === 873 || /rsync/i.test(`${p.product ?? ''} ${p.service ?? ''} ${p.banner ?? ''}`)).map((p) => scanRsyncModules(pin, host, p.port, timeoutMs + 1000)))).flat()
+  // HTTP path exposures (Apache server-status/-info, nginx stub_status) on every port
+  // that answered HTTP or HTTPS (Kimi #35).
+  const httpExposureFindings = (await Promise.all(httpInfos.map((h) => scanHttpExposure(pin, host, h.port, tlsPorts.has(h.port), timeoutMs + 2000)))).flat()
+
   // Dual-stack: scan every ADDITIONAL resolved address (e.g. the IPv6) for open
   // ports + unauth/db/ssh, so a service exposed only there isn't missed.
   const extraFindings = (await Promise.all(extraAddrs.map((addr) => scanExtraAddress(addr, host, ports, timeoutMs)))).flat()
 
   // ── Findings ────────────────────────────────────────────────────────────────
-  const findings: NetFinding[] = [...unauthFindings, ...sshFindings, ...dbFindings, ...startTlsFindings, ...vncFindings, ...axfrFindings, ...rdpFindings, ...telnetFindings, ...udpFindings, ...extraFindings]
+  const findings: NetFinding[] = [...unauthFindings, ...sshFindings, ...dbFindings, ...startTlsFindings, ...vncFindings, ...axfrFindings, ...rdpFindings, ...telnetFindings, ...udpFindings, ...ftpFindings, ...rsyncFindings, ...httpExposureFindings, ...extraFindings]
   const notes: string[] = []
   // Honesty: an open port with NO banner and no TLS/HTTP answer is genuinely
   // unknown (not "clean"). A fingerprinted service (ssh/redis/…) isn't "dark".

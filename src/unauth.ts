@@ -1,4 +1,5 @@
 import net from 'node:net'
+import tls from 'node:tls'
 import { defang } from './fingerprint.js'
 import type { NetFinding, PortResult } from './types.js'
 
@@ -115,13 +116,18 @@ export const UNAUTH_PORTS = [...new Set(PROBES.flatMap((p) => p.ports))]
  * un-fingerprinted and NOT in that set is a "dark" port that gets the distinctive
  * text-protocol hellos. Returns one finding per exposed service.
  */
-export async function scanUnauth(pin: string, host: string, open: PortResult[], timeoutMs: number, inspectedPorts: Set<number> = new Set(), httpPorts: Set<number> = new Set()): Promise<NetFinding[]> {
+export async function scanUnauth(pin: string, host: string, open: PortResult[], timeoutMs: number, inspectedPorts: Set<number> = new Set(), httpPorts: Set<number> = new Set(), tlsPorts: Set<number> = new Set()): Promise<NetFinding[]> {
   const jobs: Array<Promise<NetFinding | null>> = []
   const isHttpProbe = (pr: UnauthProbe): boolean => typeof pr.send === 'string' && pr.send.startsWith('GET ')
   for (const p of open) {
     const id = `${p.product ?? ''} ${p.service ?? ''} ${p.banner ?? ''}`.trim()
     const isDark = !p.product && !p.banner && !inspectedPorts.has(p.port)
-    const isHttp = httpPorts.has(p.port)
+    // A port that answered a TLS handshake speaks HTTPS/TLS — its probe MUST be wrapped
+    // in TLS or a cleartext hello just fails (Kimi Canto VI #36: k8s :6443 spoke only
+    // cleartext probes and was invisible). Treat TLS ports as HTTP-eligible too, so the
+    // HTTP-GET probes (k8s /version, Ollama /api/tags over HTTPS, …) run there.
+    const useTls = tlsPorts.has(p.port)
+    const isHttp = httpPorts.has(p.port) || useTls
     // Which probes apply to THIS port: exact port, fingerprint match anywhere, the
     // cheap text-protocol hellos on a dark port, OR — the fix — the HTTP-GET probes
     // on ANY port that already answered HTTP (Ollama/Qdrant/Weaviate/… speak HTTP on
@@ -134,7 +140,7 @@ export async function scanUnauth(pin: string, host: string, open: PortResult[], 
     const darkOnly = isDark ? PROBES.filter((pr) => pr.darkEligible && !exact.includes(pr)) : []
     const seen = new Set<string>()
     const chosen = [...exact, ...darkOnly].filter((pr) => (seen.has(pr.service) ? false : (seen.add(pr.service), true))).slice(0, isDark || isHttp ? 26 : 5)
-    for (const probe of chosen) jobs.push(runProbe(pin, host, p.port, probe, timeoutMs))
+    for (const probe of chosen) jobs.push(runProbe(pin, host, p.port, probe, timeoutMs, useTls))
   }
   const out = await Promise.all(jobs)
   // Keep at most one finding per host:port (prefer a CRITICAL exposed over auth-ok).
@@ -148,8 +154,8 @@ export async function scanUnauth(pin: string, host: string, open: PortResult[], 
   return [...byAt.values()]
 }
 
-async function runProbe(pin: string, host: string, port: number, probe: UnauthProbe, timeoutMs: number): Promise<NetFinding | null> {
-  const resp = await talk(pin, port, probe.send, timeoutMs)
+async function runProbe(pin: string, host: string, port: number, probe: UnauthProbe, timeoutMs: number, useTls = false): Promise<NetFinding | null> {
+  const resp = useTls ? await talkTls(pin, port, probe.send, timeoutMs) : await talk(pin, port, probe.send, timeoutMs)
   if (resp == null) return null
   if (probe.exposed(resp)) {
     return {
@@ -185,5 +191,27 @@ function talk(ip: string, port: number, send: string | Buffer | null, timeoutMs:
     sock.on('data', (d) => { buf += d.toString('latin1'); if (buf.length > 8192) finish(buf) })
     sock.once('close', () => finish(buf || null))
     try { sock.connect(port, ip) } catch { finish(null) }
+  })
+}
+
+/** Same benign request/response, but wrapped in TLS — for services that only speak
+ *  over TLS (Kimi Canto VI #36: k8s :6443, Ollama/vector-DBs behind HTTPS). SECLEVEL=0
+ *  + minVersion TLSv1 so a legacy-only TLS endpoint still completes; read-only, pinned. */
+function talkTls(ip: string, port: number, send: string | Buffer | null, timeoutMs: number): Promise<string | null> {
+  return new Promise((resolve) => {
+    let buf = ''
+    let done = false
+    const finish = (v: string | null): void => {
+      if (done) return
+      done = true
+      try { sock.destroy() } catch { /* noop */ }
+      resolve(v)
+    }
+    const sock = tls.connect({ host: ip, port, rejectUnauthorized: false, minVersion: 'TLSv1', ciphers: 'DEFAULT@SECLEVEL=0', timeout: timeoutMs }, () => { if (send) sock.write(send) })
+    sock.setTimeout(timeoutMs)
+    sock.once('timeout', () => finish(buf || null))
+    sock.once('error', () => finish(buf || null))
+    sock.on('data', (d) => { buf += d.toString('latin1'); if (buf.length > 8192) finish(buf) })
+    sock.once('close', () => finish(buf || null))
   })
 }
