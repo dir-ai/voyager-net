@@ -6,6 +6,7 @@ import { scanUnauth } from './unauth.js'
 import { inspectSsh } from './ssh.js'
 import { fingerprintDb } from './dbfingerprint.js'
 import { inspectStartTls } from './starttls.js'
+import { scanVnc } from './vnc.js'
 import { inspectTls } from './tls.js'
 import { inspectHttp } from './http.js'
 import type { Confidence, NetBrief, NetFinding, ScanOptions } from './types.js'
@@ -80,21 +81,22 @@ export async function scan(input: string, opts: ScanOptions = {}): Promise<NetBr
   // answer a benign protocol hello with NO auth? (Redis PING, Elastic GET, …) ────
   log('probing exposed services for missing authentication…')
   const inspected = new Set<number>([...tlsPorts, ...httpInfos.map((h) => h.port)])
-  const unauthFindings = await scanUnauth(pin, host, open, timeoutMs, inspected)
+  const unauthFindings = await scanUnauth(pin, host, open, timeoutMs, inspected, new Set(httpInfos.map((h) => h.port)))
 
   // SSH weak-algorithm audit on any port speaking SSH (port 22 or fingerprinted).
   const sshPorts = open.filter((p) => p.port === 22 || /ssh/i.test(`${p.product ?? ''} ${p.service ?? ''}`))
   const sshFindings = (await Promise.all(sshPorts.map((p) => inspectSsh(pin, host, p.port, timeoutMs + 2000)))).flat()
   const dbFindings = await fingerprintDb(pin, host, open, inspected, timeoutMs)
-  const startTlsPorts = open.filter((p) => [25, 587, 143, 110].includes(p.port))
-  const startTlsFindings = (await Promise.all(startTlsPorts.map((p) => inspectStartTls(pin, host, p.port, timeoutMs + 2000)))).flat()
+  const startTlsPorts = open.filter((p) => [25, 587, 465, 143, 110].includes(p.port) || /smtp|postfix|exim|imap|dovecot|pop3|\bmail\b/i.test(`${p.product ?? ''} ${p.service ?? ''} ${p.banner ?? ''}`))
+  const startTlsFindings = (await Promise.all(startTlsPorts.map((p) => inspectStartTls(pin, host, p.port, timeoutMs + 2000, `${p.product ?? ''} ${p.service ?? ''} ${p.banner ?? ''}`)))).flat()
+  const vncFindings = await scanVnc(pin, host, open, inspected, timeoutMs)
 
   // Dual-stack: scan every ADDITIONAL resolved address (e.g. the IPv6) for open
   // ports + unauth/db/ssh, so a service exposed only there isn't missed.
   const extraFindings = (await Promise.all(extraAddrs.map((addr) => scanExtraAddress(addr, host, ports, timeoutMs)))).flat()
 
   // ── Findings ────────────────────────────────────────────────────────────────
-  const findings: NetFinding[] = [...unauthFindings, ...sshFindings, ...dbFindings, ...startTlsFindings, ...extraFindings]
+  const findings: NetFinding[] = [...unauthFindings, ...sshFindings, ...dbFindings, ...startTlsFindings, ...vncFindings, ...extraFindings]
   const notes: string[] = []
   // Honesty: an open port with NO banner and no TLS/HTTP answer is genuinely
   // unknown (not "clean"). A fingerprinted service (ssh/redis/…) isn't "dark".
@@ -122,6 +124,14 @@ export async function scan(input: string, opts: ScanOptions = {}): Promise<NetBr
     // Only RSA has the <2048 rule; EC/EdDSA keys have small bit counts BY DESIGN
     // (nulled in tls.ts for named curves; the ≥512 floor also excludes Ed25519 ≈253).
     if (c.keyBits != null && c.keyBits >= 512 && c.keyBits < 2048) findings.push({ severity: 'medium', kind: 'weak-key', detail: `${c.keyBits}-bit RSA key (below 2048)`, at: `${host}:${c.port}`, suggestedFix: 'reissue with a ≥2048-bit RSA or an EC key', confidence: 'strong' })
+    // Cipher-level audit (Kimi R3-5): version can be TLS 1.2 yet the cipher weak. A
+    // non-ECDHE/DHE key exchange = RSA key transport = NO forward secrecy (a stolen
+    // private key later decrypts all captured traffic). RC4/3DES/CBC/NULL are broken.
+    if (c.cipher) {
+      const cn = c.cipher.toUpperCase()
+      if (/RC4|3DES|DES-|_DES|NULL|EXPORT|MD5|RC2/.test(cn)) findings.push({ severity: 'high', kind: 'weak-cipher', detail: `negotiates a broken cipher: ${c.cipher}`, at: `${host}:${c.port}`, suggestedFix: 'disable RC4/3DES/DES/NULL/EXPORT ciphers; use AEAD suites (AES-GCM / ChaCha20-Poly1305)', confidence: 'strong' })
+      else if (!/^(ECDHE|DHE|TLS_)/.test(cn) && (c.protocol === 'TLSv1.2' || c.protocol === 'TLSv1.1' || c.protocol === 'TLSv1')) findings.push({ severity: 'medium', kind: 'no-forward-secrecy', detail: `cipher ${c.cipher} uses RSA key exchange — NO forward secrecy (a future private-key compromise decrypts all past captured sessions)`, at: `${host}:${c.port}`, suggestedFix: 'prefer ECDHE/DHE key-exchange suites (or TLS 1.3, which is always forward-secret)', confidence: 'moderate' })
+    }
   }
 
   for (const h of httpInfos) {

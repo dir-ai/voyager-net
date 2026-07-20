@@ -69,7 +69,24 @@ const PROBES: UnauthProbe[] = [
   { service: 'Prometheus', ports: [9090], fp: /prometheus/i, darkEligible: true, send: HTTP_GET('/api/v1/status/buildinfo'), exposed: (r) => /"status"\s*:\s*"success"[\s\S]*prometheus|"version"/i.test(r), authRequired: (r) => /\b401\b/.test(r) },
   { service: 'RabbitMQ Management', ports: [15672], fp: /rabbitmq/i, darkEligible: true, send: HTTP_GET('/api/overview'), exposed: (r) => /"rabbitmq_version"|"management_version"/.test(r), authRequired: (r) => /\b401\b/.test(r) },
   { service: 'Kubernetes API', ports: [6443, 8080, 10250], fp: /kube|k8s/i, darkEligible: true, send: HTTP_GET('/version'), exposed: (r) => /"gitVersion"|"buildDate"[\s\S]*"platform"/.test(r), authRequired: (r) => /\b401\b|\b403\b|Unauthorized|forbidden/i.test(r) },
+  // ── AI-NATIVE exposure (Kimi R3-3/R3-4): an open Ollama = model theft + arbitrary
+  // inference; an open vector DB = the customers' embeddings in the clear. Our own turf.
+  { service: 'Ollama (LLM server)', ports: [11434], fp: /ollama/i, darkEligible: true, send: HTTP_GET('/api/tags'), exposed: (r) => /"models"\s*:|"modified_at"|"digest"\s*:/.test(r), authRequired: (r) => /\b401\b|\b403\b/.test(r) },
+  { service: 'Qdrant (vector DB)', ports: [6333], fp: /qdrant/i, darkEligible: true, send: HTTP_GET('/'), exposed: (r) => /"title"\s*:\s*"qdrant|qdrant[\s-]*(?:version|api)/i.test(r), authRequired: (r) => /\b401\b|\b403\b|api[- ]key/i.test(r) },
+  { service: 'Weaviate (vector DB)', ports: [8080], fp: /weaviate/i, darkEligible: true, send: HTTP_GET('/v1/meta'), exposed: (r) => /"hostname"[\s\S]*"version"|"modules"\s*:/.test(r), authRequired: (r) => /\b401\b|\b403\b/.test(r) },
+  { service: 'ChromaDB (vector DB)', ports: [8000], fp: /chroma/i, darkEligible: true, send: HTTP_GET('/api/v1/heartbeat'), exposed: (r) => /nanosecond.?heartbeat/i.test(r), authRequired: (r) => /\b401\b|\b403\b/.test(r) },
+  { service: 'MQTT broker', ports: [1883], fp: /mqtt|mosquitto/i, darkEligible: true, send: mqttConnect(), exposed: (r) => r.charCodeAt(0) === 0x20 && r.length >= 4 && r.charCodeAt(3) === 0x00, authRequired: (r) => r.charCodeAt(0) === 0x20 && r.length >= 4 && (r.charCodeAt(3) === 0x04 || r.charCodeAt(3) === 0x05) },
 ]
+
+/** A minimal MQTT v3.1.1 CONNECT packet (clean session, client-id "voyager"). An
+ *  anonymous broker replies CONNACK with return code 0x00 (accepted). */
+function mqttConnect(): Buffer {
+  const clientId = Buffer.from('voyager', 'latin1')
+  const varHeader = Buffer.concat([Buffer.from([0x00, 0x04]), Buffer.from('MQTT', 'latin1'), Buffer.from([0x04, 0x02, 0x00, 0x3c])])
+  const payload = Buffer.concat([Buffer.from([0x00, clientId.length]), clientId])
+  const body = Buffer.concat([varHeader, payload])
+  return Buffer.concat([Buffer.from([0x10, body.length]), body])
+}
 
 /** Ports worth adding to the default sweep because they host unauth-prone services. */
 export const UNAUTH_PORTS = [...new Set(PROBES.flatMap((p) => p.ports))]
@@ -80,17 +97,25 @@ export const UNAUTH_PORTS = [...new Set(PROBES.flatMap((p) => p.ports))]
  * un-fingerprinted and NOT in that set is a "dark" port that gets the distinctive
  * text-protocol hellos. Returns one finding per exposed service.
  */
-export async function scanUnauth(pin: string, host: string, open: PortResult[], timeoutMs: number, inspectedPorts: Set<number> = new Set()): Promise<NetFinding[]> {
+export async function scanUnauth(pin: string, host: string, open: PortResult[], timeoutMs: number, inspectedPorts: Set<number> = new Set(), httpPorts: Set<number> = new Set()): Promise<NetFinding[]> {
   const jobs: Array<Promise<NetFinding | null>> = []
+  const isHttpProbe = (pr: UnauthProbe): boolean => typeof pr.send === 'string' && pr.send.startsWith('GET ')
   for (const p of open) {
     const id = `${p.product ?? ''} ${p.service ?? ''} ${p.banner ?? ''}`.trim()
     const isDark = !p.product && !p.banner && !inspectedPorts.has(p.port)
-    // Which probes apply to THIS port: exact port, fingerprint match anywhere, or
-    // (for a dark port) the cheap text-protocol identifiers.
-    const applicable = PROBES.filter((pr) => pr.ports.includes(p.port) || (id && pr.fp?.test(id)) || (isDark && pr.darkEligible))
-    // De-dupe by service and cap how many hellos a single dark port receives.
+    const isHttp = httpPorts.has(p.port)
+    // Which probes apply to THIS port: exact port, fingerprint match anywhere, the
+    // cheap text-protocol hellos on a dark port, OR — the fix — the HTTP-GET probes
+    // on ANY port that already answered HTTP (Ollama/Qdrant/Weaviate/… speak HTTP on
+    // arbitrary ports, so they're never "dark" and were being skipped, Kimi R3-3/R3-4).
+    // EXACT matches (port / fingerprint / HTTP-answered) come FIRST and are never
+    // truncated; the generic dark-port hellos fill the rest up to the cap. Without
+    // this a port-specific probe near the end of the list (e.g. MQTT) got cut when
+    // the dark rotation grew.
+    const exact = PROBES.filter((pr) => pr.ports.includes(p.port) || (id && pr.fp?.test(id)) || (isHttp && isHttpProbe(pr)))
+    const darkOnly = isDark ? PROBES.filter((pr) => pr.darkEligible && !exact.includes(pr)) : []
     const seen = new Set<string>()
-    const chosen = applicable.filter((pr) => (seen.has(pr.service) ? false : (seen.add(pr.service), true))).slice(0, isDark ? 12 : 3)
+    const chosen = [...exact, ...darkOnly].filter((pr) => (seen.has(pr.service) ? false : (seen.add(pr.service), true))).slice(0, isDark || isHttp ? 18 : 5)
     for (const probe of chosen) jobs.push(runProbe(pin, host, p.port, probe, timeoutMs))
   }
   const out = await Promise.all(jobs)

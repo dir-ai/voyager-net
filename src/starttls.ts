@@ -10,15 +10,26 @@ import type { NetFinding } from './types.js'
  * POP3), then attempt a TLSv1/1.1 handshake over the upgraded socket. Read-only: no
  * auth, no mail sent — just the negotiation. Pinned to the vetted IP.
  */
-const DANCE: Record<number, { greetOk: RegExp; cmd: string; go: RegExp }> = {
-  25: { greetOk: /^220/m, cmd: 'EHLO voyager.local\r\nSTARTTLS\r\n', go: /^220/m },
-  587: { greetOk: /^220/m, cmd: 'EHLO voyager.local\r\nSTARTTLS\r\n', go: /^220/m },
-  143: { greetOk: /^\*\s*OK/im, cmd: 'a1 STARTTLS\r\n', go: /a1 OK/i },
-  110: { greetOk: /^\+OK/m, cmd: 'STLS\r\n', go: /^\+OK/m },
+interface Dance { greetOk: RegExp; cmd: string; go: RegExp }
+const SMTP: Dance = { greetOk: /^220/m, cmd: 'EHLO voyager.local\r\nSTARTTLS\r\n', go: /^220/m }
+const IMAP: Dance = { greetOk: /^\*\s*OK/im, cmd: 'a1 STARTTLS\r\n', go: /a1 OK/i }
+const POP3: Dance = { greetOk: /^\+OK/m, cmd: 'STLS\r\n', go: /^\+OK/m }
+const DANCE_BY_PORT: Record<number, Dance> = { 25: SMTP, 587: SMTP, 465: SMTP, 143: IMAP, 110: POP3 }
+
+/** Pick the STARTTLS dance by well-known port OR by the fingerprinted product — so a
+ *  Postfix on :2525 (Kimi R3-6: fingerprint sees it, the dance was port-keyed) upgrades
+ *  correctly. Returns null when the port/service isn't a STARTTLS mail protocol. */
+function pickDance(port: number, hint: string): Dance | null {
+  if (DANCE_BY_PORT[port]) return DANCE_BY_PORT[port]
+  const h = hint.toLowerCase()
+  if (/smtp|postfix|exim|sendmail|mail/.test(h)) return SMTP
+  if (/imap|dovecot|cyrus/.test(h)) return IMAP
+  if (/pop3|pop\b/.test(h)) return POP3
+  return null
 }
 
-export async function inspectStartTls(pin: string, host: string, port: number, timeoutMs: number): Promise<NetFinding[]> {
-  const d = DANCE[port]
+export async function inspectStartTls(pin: string, host: string, port: number, timeoutMs: number, hint = ''): Promise<NetFinding[]> {
+  const d = pickDance(port, hint)
   if (!d) return []
   const weak = await probeWeak(pin, port, d, timeoutMs)
   if (!weak.length) return []
@@ -29,7 +40,7 @@ export async function inspectStartTls(pin: string, host: string, port: number, t
 }
 
 /** Try a TLSv1 and a TLSv1.1 handshake AFTER the STARTTLS upgrade; return those that succeed. */
-async function probeWeak(pin: string, port: number, d: (typeof DANCE)[number], timeoutMs: number): Promise<string[]> {
+async function probeWeak(pin: string, port: number, d: Dance, timeoutMs: number): Promise<string[]> {
   const out: string[] = []
   for (const version of ['TLSv1', 'TLSv1.1'] as const) {
     if (await handshakes(pin, port, d, version, timeoutMs)) out.push(version)
@@ -37,7 +48,7 @@ async function probeWeak(pin: string, port: number, d: (typeof DANCE)[number], t
   return out
 }
 
-function handshakes(pin: string, port: number, d: (typeof DANCE)[number], version: 'TLSv1' | 'TLSv1.1', timeoutMs: number): Promise<boolean> {
+function handshakes(pin: string, port: number, d: Dance, version: 'TLSv1' | 'TLSv1.1', timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
     const sock = new net.Socket()
     let stage: 'greet' | 'go' = 'greet'
