@@ -1,10 +1,11 @@
-import { lookup } from 'node:dns/promises'
+import { lookup, resolve4, resolve6 } from 'node:dns/promises'
 import { parseTarget, blockedIpReason } from './authorize.js'
 import { scanDns } from './dns.js'
 import { scanPorts, DEFAULT_PORTS } from './ports.js'
 import { scanUnauth } from './unauth.js'
 import { inspectSsh } from './ssh.js'
 import { fingerprintDb } from './dbfingerprint.js'
+import { inspectStartTls } from './starttls.js'
 import { inspectTls } from './tls.js'
 import { inspectHttp } from './http.js'
 import type { Confidence, NetBrief, NetFinding, ScanOptions } from './types.js'
@@ -38,16 +39,25 @@ export async function scan(input: string, opts: ScanOptions = {}): Promise<NetBr
   const timeoutMs = Math.min(Math.max(opts.timeoutMs ?? 3000, 500), 15_000)
   const ports = (opts.ports && opts.ports.length ? opts.ports : DEFAULT_PORTS).filter((p) => Number.isInteger(p) && p > 0 && p < 65536).slice(0, 64)
 
-  // ── Resolve ONCE and pin (anti-rebinding). All connections use this IP. ──────
+  // ── Resolve and pin (anti-rebinding). DUAL-STACK: a domain can have A *and* AAAA
+  // records; a service exposed only over IPv6 is invisible if you pin a single v4
+  // (Kimi #6). Resolve BOTH families, vet each, scan the primary fully and the extra
+  // addresses in a lighter pass so a v6-only service is still caught. ────────────
   let resolvedIp: string | null = t.kind === 'ip' ? host : null
+  let extraAddrs: string[] = []
   if (t.kind === 'domain') {
+    let all: string[] = []
     try {
-      resolvedIp = (await lookup(host)).address
+      const [v4, v6] = await Promise.all([resolve4(host).catch(() => [] as string[]), resolve6(host).catch(() => [] as string[])])
+      all = [...v4, ...v6]
+      if (!all.length) all = [(await lookup(host)).address]
     } catch {
       return { ...base(), error: `could not resolve ${host}` }
     }
-    const blocked = blockedIpReason(resolvedIp)
-    if (blocked) return { ...base(), resolvedIp, error: `${host} ${blocked}` }
+    const vetted = all.filter((ip) => !blockedIpReason(ip)).slice(0, 4)
+    if (!vetted.length) return { ...base(), resolvedIp: all[0] ?? null, error: `${host} ${blockedIpReason(all[0] ?? '') ?? 'resolves only to blocked addresses'}` }
+    resolvedIp = vetted[0]
+    extraAddrs = vetted.slice(1)
   }
   const pin = resolvedIp ?? host
 
@@ -76,9 +86,15 @@ export async function scan(input: string, opts: ScanOptions = {}): Promise<NetBr
   const sshPorts = open.filter((p) => p.port === 22 || /ssh/i.test(`${p.product ?? ''} ${p.service ?? ''}`))
   const sshFindings = (await Promise.all(sshPorts.map((p) => inspectSsh(pin, host, p.port, timeoutMs + 2000)))).flat()
   const dbFindings = await fingerprintDb(pin, host, open, inspected, timeoutMs)
+  const startTlsPorts = open.filter((p) => [25, 587, 143, 110].includes(p.port))
+  const startTlsFindings = (await Promise.all(startTlsPorts.map((p) => inspectStartTls(pin, host, p.port, timeoutMs + 2000)))).flat()
+
+  // Dual-stack: scan every ADDITIONAL resolved address (e.g. the IPv6) for open
+  // ports + unauth/db/ssh, so a service exposed only there isn't missed.
+  const extraFindings = (await Promise.all(extraAddrs.map((addr) => scanExtraAddress(addr, host, ports, timeoutMs)))).flat()
 
   // ── Findings ────────────────────────────────────────────────────────────────
-  const findings: NetFinding[] = [...unauthFindings, ...sshFindings, ...dbFindings]
+  const findings: NetFinding[] = [...unauthFindings, ...sshFindings, ...dbFindings, ...startTlsFindings, ...extraFindings]
   const notes: string[] = []
   // Honesty: an open port with NO banner and no TLS/HTTP answer is genuinely
   // unknown (not "clean"). A fingerprinted service (ssh/redis/…) isn't "dark".
@@ -176,4 +192,18 @@ export async function scan(input: string, opts: ScanOptions = {}): Promise<NetBr
     authorized: true, summary, dns, ports: portResults, tls: tlsInfos, http: httpInfos, findings,
     confidence, suggestedNextProbes, sanitization: { framedFields }, notes,
   }
+}
+
+/** Lighter scan of an ADDITIONAL resolved address (dual-stack) — open ports +
+ *  unauth/db/ssh + exposed-service, tagged with the address so a v6-only service is
+ *  attributable. Read-only, pinned to the vetted address. */
+async function scanExtraAddress(addr: string, host: string, ports: number[], timeoutMs: number): Promise<NetFinding[]> {
+  const label = `${host}[${addr}]`
+  const open = (await scanPorts(addr, ports, timeoutMs)).filter((p) => p.state === 'open')
+  if (!open.length) return []
+  const [unauth, db] = await Promise.all([scanUnauth(addr, label, open, timeoutMs, new Set()), fingerprintDb(addr, label, open, new Set(), timeoutMs)])
+  const ssh = (await Promise.all(open.filter((p) => p.port === 22).map((p) => inspectSsh(addr, label, p.port, timeoutMs + 2000)))).flat()
+  const exposed: NetFinding[] = []
+  for (const p of open) if (SENSITIVE[p.port]) exposed.push({ severity: 'high', kind: 'exposed-service', detail: `${SENSITIVE[p.port]} (port ${p.port}) reachable on ${addr.includes(':') ? 'IPv6' : 'IPv4'} ${addr}`, at: `${label}:${p.port}`, suggestedFix: `restrict ${SENSITIVE[p.port]} to a private network / VPN`, confidence: 'strong' })
+  return [...unauth, ...db, ...ssh, ...exposed]
 }
