@@ -7,6 +7,8 @@ import { inspectSsh } from './ssh.js'
 import { fingerprintDb } from './dbfingerprint.js'
 import { inspectStartTls } from './starttls.js'
 import { scanVnc } from './vnc.js'
+import { scanAxfr } from './axfr.js'
+import { inspectRdp, inspectTelnet } from './rdp.js'
 import { inspectTls } from './tls.js'
 import { inspectHttp } from './http.js'
 import type { Confidence, NetBrief, NetFinding, ScanOptions } from './types.js'
@@ -90,13 +92,16 @@ export async function scan(input: string, opts: ScanOptions = {}): Promise<NetBr
   const startTlsPorts = open.filter((p) => [25, 587, 465, 143, 110].includes(p.port) || /smtp|postfix|exim|imap|dovecot|pop3|\bmail\b/i.test(`${p.product ?? ''} ${p.service ?? ''} ${p.banner ?? ''}`))
   const startTlsFindings = (await Promise.all(startTlsPorts.map((p) => inspectStartTls(pin, host, p.port, timeoutMs + 2000, `${p.product ?? ''} ${p.service ?? ''} ${p.banner ?? ''}`)))).flat()
   const vncFindings = await scanVnc(pin, host, open, inspected, timeoutMs)
+  const axfrFindings = t.kind === 'domain' && open.some((p) => p.port === 53) ? await scanAxfr(pin, host, host, 53, timeoutMs + 2000) : []
+  const rdpFindings = (await Promise.all(open.filter((p) => p.port === 3389 || /\brdp\b/i.test(`${p.product ?? ''} ${p.service ?? ''}`)).map((p) => inspectRdp(pin, host, p.port, timeoutMs + 2000)))).flat()
+  const telnetFindings = (await Promise.all(open.filter((p) => p.port === 23 || /telnet/i.test(`${p.product ?? ''} ${p.service ?? ''}`)).map((p) => inspectTelnet(pin, host, p.port, timeoutMs)))).flat()
 
   // Dual-stack: scan every ADDITIONAL resolved address (e.g. the IPv6) for open
   // ports + unauth/db/ssh, so a service exposed only there isn't missed.
   const extraFindings = (await Promise.all(extraAddrs.map((addr) => scanExtraAddress(addr, host, ports, timeoutMs)))).flat()
 
   // ── Findings ────────────────────────────────────────────────────────────────
-  const findings: NetFinding[] = [...unauthFindings, ...sshFindings, ...dbFindings, ...startTlsFindings, ...vncFindings, ...extraFindings]
+  const findings: NetFinding[] = [...unauthFindings, ...sshFindings, ...dbFindings, ...startTlsFindings, ...vncFindings, ...axfrFindings, ...rdpFindings, ...telnetFindings, ...extraFindings]
   const notes: string[] = []
   // Honesty: an open port with NO banner and no TLS/HTTP answer is genuinely
   // unknown (not "clean"). A fingerprinted service (ssh/redis/…) isn't "dark".
