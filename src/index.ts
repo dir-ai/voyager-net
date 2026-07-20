@@ -6,6 +6,7 @@
 // remediation ("the hands") is a separate, consent-gated organ.
 export { scan } from './scan.js'
 export { scanUnauth, UNAUTH_PORTS } from './unauth.js'
+export { inspectSsh } from './ssh.js'
 export { parseTarget, blockedIpReason } from './authorize.js'
 export { DEFAULT_PORTS } from './ports.js'
 export { VERSION } from './version.js'
