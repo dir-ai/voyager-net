@@ -7,6 +7,7 @@
 export { scan } from './scan.js'
 export { scanUnauth, UNAUTH_PORTS } from './unauth.js'
 export { inspectSsh } from './ssh.js'
+export { fingerprintDb } from './dbfingerprint.js'
 export { parseTarget, blockedIpReason } from './authorize.js'
 export { DEFAULT_PORTS } from './ports.js'
 export { VERSION } from './version.js'

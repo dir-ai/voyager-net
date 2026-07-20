@@ -52,19 +52,23 @@ function mongoIsMaster(): Buffer {
 
 const HTTP_GET = (path: string): string => `GET ${path} HTTP/1.0\r\nHost: localhost\r\nUser-Agent: voyager-net\r\n\r\n`
 
+// EVERY probe is darkEligible (Kimi round-3 #1): the hellos are innocuous read-only
+// requests (a PING, a GET, an isMaster), so a datastore/admin service on an ARBITRARY
+// port is caught the same as on its default one — Mongo on :27018, Elastic on :9999,
+// etc. all get probed, not just Redis/Memcached/ZooKeeper.
 const PROBES: UnauthProbe[] = [
   { service: 'Redis', ports: [6379], fp: /redis/i, darkEligible: true, send: 'PING\r\n', exposed: (r) => /\+PONG/.test(r), authRequired: (r) => /NOAUTH|WRONGPASS|-ERR[^\n]*auth/i.test(r) },
   { service: 'Memcached', ports: [11211], fp: /memcached/i, darkEligible: true, send: 'version\r\n', exposed: (r) => /^VERSION\s/i.test(r.trim()), authRequired: () => false },
   { service: 'ZooKeeper', ports: [2181], fp: /zookeeper/i, darkEligible: true, send: 'ruok', exposed: (r) => /imok/.test(r), authRequired: () => false },
-  { service: 'MongoDB', ports: [27017], fp: /mongo/i, send: mongoIsMaster(), exposed: (r) => /ismaster|maxWireVersion|maxBsonObjectSize/i.test(r), authRequired: (r) => /auth|Unauthorized|not authorized/i.test(r) },
-  { service: 'Elasticsearch', ports: [9200], fp: /elastic/i, send: HTTP_GET('/'), exposed: (r) => /"cluster_name"|"lucene_version"|"number_of_nodes"/.test(r), authRequired: (r) => /\b401\b|security_exception|missing authentication/i.test(r) },
-  { service: 'CouchDB', ports: [5984], fp: /couchdb/i, send: HTTP_GET('/'), exposed: (r) => /"couchdb"\s*:\s*"Welcome"/.test(r), authRequired: (r) => /\b401\b|unauthorized/i.test(r) },
-  { service: 'Docker Engine API', ports: [2375], fp: /docker/i, send: HTTP_GET('/version'), exposed: (r) => /"ApiVersion"|"DockerRootDir"|"GoVersion"/.test(r), authRequired: (r) => /\b401\b/.test(r) },
-  { service: 'etcd', ports: [2379], fp: /etcd/i, send: HTTP_GET('/version'), exposed: (r) => /"etcdserver"|"etcdcluster"/.test(r), authRequired: (r) => /\b401\b|Unauthorized/i.test(r) },
-  { service: 'Consul', ports: [8500], fp: /consul/i, send: HTTP_GET('/v1/status/leader'), exposed: (r) => /200 OK[\s\S]*"[\d.]+:\d+"/.test(r), authRequired: (r) => /ACL|\b403\b/i.test(r) },
-  { service: 'Prometheus', ports: [9090], fp: /prometheus/i, send: HTTP_GET('/api/v1/status/buildinfo'), exposed: (r) => /"status"\s*:\s*"success"[\s\S]*prometheus|"version"/i.test(r), authRequired: (r) => /\b401\b/.test(r) },
-  { service: 'RabbitMQ Management', ports: [15672], fp: /rabbitmq/i, send: HTTP_GET('/api/overview'), exposed: (r) => /"rabbitmq_version"|"management_version"/.test(r), authRequired: (r) => /\b401\b/.test(r) },
-  { service: 'Kubernetes API', ports: [6443, 8080, 10250], fp: /kube|k8s/i, send: HTTP_GET('/version'), exposed: (r) => /"gitVersion"|"buildDate"[\s\S]*"platform"/.test(r), authRequired: (r) => /\b401\b|\b403\b|Unauthorized|forbidden/i.test(r) },
+  { service: 'MongoDB', ports: [27017], fp: /mongo/i, darkEligible: true, send: mongoIsMaster(), exposed: (r) => /ismaster|maxWireVersion|maxBsonObjectSize/i.test(r), authRequired: (r) => /auth|Unauthorized|not authorized/i.test(r) },
+  { service: 'Elasticsearch', ports: [9200], fp: /elastic/i, darkEligible: true, send: HTTP_GET('/'), exposed: (r) => /"cluster_name"|"lucene_version"|"number_of_nodes"/.test(r), authRequired: (r) => /\b401\b|security_exception|missing authentication/i.test(r) },
+  { service: 'CouchDB', ports: [5984], fp: /couchdb/i, darkEligible: true, send: HTTP_GET('/'), exposed: (r) => /"couchdb"\s*:\s*"Welcome"/.test(r), authRequired: (r) => /\b401\b|unauthorized/i.test(r) },
+  { service: 'Docker Engine API', ports: [2375], fp: /docker/i, darkEligible: true, send: HTTP_GET('/version'), exposed: (r) => /"ApiVersion"|"DockerRootDir"|"GoVersion"/.test(r), authRequired: (r) => /\b401\b/.test(r) },
+  { service: 'etcd', ports: [2379], fp: /etcd/i, darkEligible: true, send: HTTP_GET('/version'), exposed: (r) => /"etcdserver"|"etcdcluster"/.test(r), authRequired: (r) => /\b401\b|Unauthorized/i.test(r) },
+  { service: 'Consul', ports: [8500], fp: /consul/i, darkEligible: true, send: HTTP_GET('/v1/status/leader'), exposed: (r) => /200 OK[\s\S]*"[\d.]+:\d+"/.test(r), authRequired: (r) => /ACL|\b403\b/i.test(r) },
+  { service: 'Prometheus', ports: [9090], fp: /prometheus/i, darkEligible: true, send: HTTP_GET('/api/v1/status/buildinfo'), exposed: (r) => /"status"\s*:\s*"success"[\s\S]*prometheus|"version"/i.test(r), authRequired: (r) => /\b401\b/.test(r) },
+  { service: 'RabbitMQ Management', ports: [15672], fp: /rabbitmq/i, darkEligible: true, send: HTTP_GET('/api/overview'), exposed: (r) => /"rabbitmq_version"|"management_version"/.test(r), authRequired: (r) => /\b401\b/.test(r) },
+  { service: 'Kubernetes API', ports: [6443, 8080, 10250], fp: /kube|k8s/i, darkEligible: true, send: HTTP_GET('/version'), exposed: (r) => /"gitVersion"|"buildDate"[\s\S]*"platform"/.test(r), authRequired: (r) => /\b401\b|\b403\b|Unauthorized|forbidden/i.test(r) },
 ]
 
 /** Ports worth adding to the default sweep because they host unauth-prone services. */
@@ -86,7 +90,7 @@ export async function scanUnauth(pin: string, host: string, open: PortResult[], 
     const applicable = PROBES.filter((pr) => pr.ports.includes(p.port) || (id && pr.fp?.test(id)) || (isDark && pr.darkEligible))
     // De-dupe by service and cap how many hellos a single dark port receives.
     const seen = new Set<string>()
-    const chosen = applicable.filter((pr) => (seen.has(pr.service) ? false : (seen.add(pr.service), true))).slice(0, isDark ? 4 : 3)
+    const chosen = applicable.filter((pr) => (seen.has(pr.service) ? false : (seen.add(pr.service), true))).slice(0, isDark ? 12 : 3)
     for (const probe of chosen) jobs.push(runProbe(pin, host, p.port, probe, timeoutMs))
   }
   const out = await Promise.all(jobs)

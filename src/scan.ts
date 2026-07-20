@@ -4,6 +4,7 @@ import { scanDns } from './dns.js'
 import { scanPorts, DEFAULT_PORTS } from './ports.js'
 import { scanUnauth } from './unauth.js'
 import { inspectSsh } from './ssh.js'
+import { fingerprintDb } from './dbfingerprint.js'
 import { inspectTls } from './tls.js'
 import { inspectHttp } from './http.js'
 import type { Confidence, NetBrief, NetFinding, ScanOptions } from './types.js'
@@ -74,9 +75,10 @@ export async function scan(input: string, opts: ScanOptions = {}): Promise<NetBr
   // SSH weak-algorithm audit on any port speaking SSH (port 22 or fingerprinted).
   const sshPorts = open.filter((p) => p.port === 22 || /ssh/i.test(`${p.product ?? ''} ${p.service ?? ''}`))
   const sshFindings = (await Promise.all(sshPorts.map((p) => inspectSsh(pin, host, p.port, timeoutMs + 2000)))).flat()
+  const dbFindings = await fingerprintDb(pin, host, open, inspected, timeoutMs)
 
   // ── Findings ────────────────────────────────────────────────────────────────
-  const findings: NetFinding[] = [...unauthFindings, ...sshFindings]
+  const findings: NetFinding[] = [...unauthFindings, ...sshFindings, ...dbFindings]
   const notes: string[] = []
   // Honesty: an open port with NO banner and no TLS/HTTP answer is genuinely
   // unknown (not "clean"). A fingerprinted service (ssh/redis/…) isn't "dark".
