@@ -67,7 +67,8 @@ export async function scan(input: string, opts: ScanOptions = {}): Promise<NetBr
   // ── Unauthenticated-service detection (N1): does an open datastore/admin port
   // answer a benign protocol hello with NO auth? (Redis PING, Elastic GET, …) ────
   log('probing exposed services for missing authentication…')
-  const unauthFindings = await scanUnauth(pin, host, open, timeoutMs)
+  const inspected = new Set<number>([...tlsPorts, ...httpInfos.map((h) => h.port)])
+  const unauthFindings = await scanUnauth(pin, host, open, timeoutMs, inspected)
 
   // ── Findings ────────────────────────────────────────────────────────────────
   const findings: NetFinding[] = [...unauthFindings]
@@ -128,6 +129,7 @@ export async function scan(input: string, opts: ScanOptions = {}): Promise<NetBr
     // Clickjacking + version leak.
     if (isHttps && !h.securityHeaders['x-frame-options'] && !/frame-ancestors/i.test(h.headerValues.csp ?? '')) findings.push({ severity: 'low', kind: 'missing-frame-protection', detail: 'no clickjacking protection (X-Frame-Options / CSP frame-ancestors)', at: h.url, suggestedFix: "add X-Frame-Options: DENY or CSP frame-ancestors 'none'", confidence: 'moderate' })
     if (h.server && /\d/.test(h.server)) findings.push({ severity: 'low', kind: 'version-leak', detail: `server version disclosed in header: ${h.server}`, at: h.url, suggestedFix: 'remove version details from the Server header', confidence: 'moderate' })
+    if (h.app) findings.push({ severity: 'medium', kind: 'app-exposed', detail: `web application identified: ${h.app} — reachable at ${h.url}`, at: h.url, suggestedFix: `confirm ${h.app} is meant to be exposed here; if it is an admin/ops console, put it behind auth/VPN and check ${h.app} against your CVE feed`, confidence: 'moderate' })
   }
   for (const h of httpInfos) if (h.url.startsWith('http://') && !h.redirectsToHttps) findings.push({ severity: 'low', kind: 'no-https-redirect', detail: 'plain HTTP does not redirect to HTTPS', at: h.url, suggestedFix: 'redirect all HTTP to HTTPS (301)', confidence: 'strong' })
 

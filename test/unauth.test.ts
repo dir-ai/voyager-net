@@ -45,3 +45,22 @@ test('scanUnauth: a port with no matching service probe yields nothing, never th
   const findings = await scanUnauth('127.0.0.1', 'localhost', openPort(12345), 300)
   assert.deepEqual(findings, [])
 })
+
+// Kimi #1: PROTOCOL over PORT — a dark (un-fingerprinted) port gets the text-protocol
+// hellos, so Redis on a NON-standard port is still caught.
+test('scanUnauth: Redis on a NON-standard, un-fingerprinted port is still CRITICAL (protocol > port)', async () => {
+  const srv = await bindMock(31812, (c) => (/PING/i.test(c) ? '+PONG\r\n' : null))
+  if (!srv) return // port busy → soft-skip
+  try {
+    // A bare open port with NO product/banner and not in inspectedPorts = dark.
+    const findings = await scanUnauth('127.0.0.1', 'localhost', [{ port: 31812, state: 'open', open: true }], 1500, new Set())
+    assert.ok(findings.some((f) => f.kind === 'unauthenticated-service' && /31812/.test(f.at ?? '')), 'dark-port Redis detected by protocol hello, not port table')
+  } finally {
+    srv.close()
+  }
+})
+
+test('UNAUTH_PORTS includes the cloud-native set (mongo/etcd/consul/prometheus/rabbitmq/k8s)', async () => {
+  const { UNAUTH_PORTS } = await import('../dist/unauth.js')
+  for (const p of [27017, 2379, 8500, 9090, 15672, 6443]) assert.ok(UNAUTH_PORTS.includes(p), `port ${p} covered`)
+})

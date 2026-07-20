@@ -3,73 +3,124 @@ import { defang } from './fingerprint.js'
 import type { NetFinding, PortResult } from './types.js'
 
 /**
- * Unauthenticated-service detection (N1). An OPEN datastore/admin port is not the
- * finding — an open port that answers a benign protocol probe WITHOUT asking for
- * credentials is. For each known auth-expecting service we send ONE harmless,
- * read-only command and classify the reply:
- *   - `exposed`      → it returned data with no auth  → CRITICAL.
- *   - `authRequired` → it demanded auth (e.g. Redis NOAUTH) → good, reported clean.
- *   - neither        → inconclusive → left UNKNOWN, never called clean.
- * No write, no mutation, no exploit — a single protocol hello, and only against a
- * host the caller authorized. This is the "exposed vs merely open" distinction a
- * real audit needs (Kimi N1: an open Redis with no password).
+ * Unauthenticated-service detection — PROTOCOL-driven, not port-driven (the lesson
+ * from the earlier port-keyed bug, applied here too). A service that expects auth
+ * is a finding when it answers a benign hello WITHOUT credentials, wherever it
+ * runs. We identify the candidate service three ways — the discovered fingerprint
+ * (Redis on :31812 is still Redis), the well-known port, and (for a dark port that
+ * volunteered nothing) a small rotation of distinctive text-protocol hellos — then
+ * classify the reply: exposed (no auth → CRITICAL), authRequired (good), or
+ * inconclusive (UNKNOWN, never "clean"). Read-only, one hello, authorized host only.
  */
 interface UnauthProbe {
   service: string
-  /** Bytes to send after connect; null = read the banner the service volunteers. */
-  send: string | null
-  /** Reply proves the service answered WITHOUT authentication. */
+  /** Well-known ports for this service. */
+  ports: number[]
+  /** Matches a discovered banner/product so the probe fires on ANY port. */
+  fp?: RegExp
+  /** Safe to try on an unidentified (dark) port — a distinctive, cheap protocol hello. */
+  darkEligible?: boolean
+  /** Bytes/string to send; a Buffer for binary protocols; null = just read the banner. */
+  send: string | Buffer | null
   exposed: (resp: string) => boolean
-  /** Reply proves the service demanded authentication (the safe outcome). */
   authRequired: (resp: string) => boolean
 }
 
-const PROBES: Record<number, UnauthProbe> = {
-  6379: { service: 'Redis', send: 'PING\r\n', exposed: (r) => /\+PONG/.test(r), authRequired: (r) => /NOAUTH|WRONGPASS|-ERR[^\n]*auth/i.test(r) },
-  11211: { service: 'Memcached', send: 'version\r\n', exposed: (r) => /^VERSION\s/i.test(r.trim()), authRequired: () => false },
-  9200: { service: 'Elasticsearch', send: 'GET / HTTP/1.0\r\nHost: localhost\r\n\r\n', exposed: (r) => /"cluster_name"|"lucene_version"|"number_of_nodes"/.test(r), authRequired: (r) => /\b401\b|security_exception|missing authentication/i.test(r) },
-  5984: { service: 'CouchDB', send: 'GET / HTTP/1.0\r\nHost: localhost\r\n\r\n', exposed: (r) => /"couchdb"\s*:\s*"Welcome"/.test(r), authRequired: (r) => /\b401\b|unauthorized/i.test(r) },
-  2375: { service: 'Docker Engine API', send: 'GET /version HTTP/1.0\r\nHost: localhost\r\n\r\n', exposed: (r) => /"ApiVersion"|"DockerRootDir"|"GoVersion"/.test(r), authRequired: (r) => /\b401\b/.test(r) },
-  2181: { service: 'ZooKeeper', send: 'ruok', exposed: (r) => /imok/.test(r), authRequired: () => false },
+// Minimal MongoDB legacy OP_QUERY {isMaster:1} on admin.$cmd — enough to make an
+// unauthenticated mongod answer with a document (maxWireVersion/ismaster).
+function mongoIsMaster(): Buffer {
+  const bson = Buffer.concat([
+    Buffer.from([0x13, 0x00, 0x00, 0x00]), // doc len = 19
+    Buffer.from([0x10]), Buffer.from('isMaster\0', 'latin1'), Buffer.from([0x01, 0x00, 0x00, 0x00]), // int32 isMaster=1
+    Buffer.from([0x00]),
+  ])
+  const coll = Buffer.from('admin.$cmd\0', 'latin1')
+  const body = Buffer.concat([
+    Buffer.from([0x00, 0x00, 0x00, 0x00]), // flags
+    coll,
+    Buffer.from([0x00, 0x00, 0x00, 0x00]), // numberToSkip
+    Buffer.from([0x01, 0x00, 0x00, 0x00]), // numberToReturn
+    bson,
+  ])
+  const header = Buffer.alloc(16)
+  header.writeInt32LE(16 + body.length, 0) // messageLength
+  header.writeInt32LE(1, 4) // requestID
+  header.writeInt32LE(0, 8) // responseTo
+  header.writeInt32LE(2004, 12) // opCode OP_QUERY
+  return Buffer.concat([header, body])
 }
+
+const HTTP_GET = (path: string): string => `GET ${path} HTTP/1.0\r\nHost: localhost\r\nUser-Agent: voyager-net\r\n\r\n`
+
+const PROBES: UnauthProbe[] = [
+  { service: 'Redis', ports: [6379], fp: /redis/i, darkEligible: true, send: 'PING\r\n', exposed: (r) => /\+PONG/.test(r), authRequired: (r) => /NOAUTH|WRONGPASS|-ERR[^\n]*auth/i.test(r) },
+  { service: 'Memcached', ports: [11211], fp: /memcached/i, darkEligible: true, send: 'version\r\n', exposed: (r) => /^VERSION\s/i.test(r.trim()), authRequired: () => false },
+  { service: 'ZooKeeper', ports: [2181], fp: /zookeeper/i, darkEligible: true, send: 'ruok', exposed: (r) => /imok/.test(r), authRequired: () => false },
+  { service: 'MongoDB', ports: [27017], fp: /mongo/i, send: mongoIsMaster(), exposed: (r) => /ismaster|maxWireVersion|maxBsonObjectSize/i.test(r), authRequired: (r) => /auth|Unauthorized|not authorized/i.test(r) },
+  { service: 'Elasticsearch', ports: [9200], fp: /elastic/i, send: HTTP_GET('/'), exposed: (r) => /"cluster_name"|"lucene_version"|"number_of_nodes"/.test(r), authRequired: (r) => /\b401\b|security_exception|missing authentication/i.test(r) },
+  { service: 'CouchDB', ports: [5984], fp: /couchdb/i, send: HTTP_GET('/'), exposed: (r) => /"couchdb"\s*:\s*"Welcome"/.test(r), authRequired: (r) => /\b401\b|unauthorized/i.test(r) },
+  { service: 'Docker Engine API', ports: [2375], fp: /docker/i, send: HTTP_GET('/version'), exposed: (r) => /"ApiVersion"|"DockerRootDir"|"GoVersion"/.test(r), authRequired: (r) => /\b401\b/.test(r) },
+  { service: 'etcd', ports: [2379], fp: /etcd/i, send: HTTP_GET('/version'), exposed: (r) => /"etcdserver"|"etcdcluster"/.test(r), authRequired: (r) => /\b401\b|Unauthorized/i.test(r) },
+  { service: 'Consul', ports: [8500], fp: /consul/i, send: HTTP_GET('/v1/status/leader'), exposed: (r) => /200 OK[\s\S]*"[\d.]+:\d+"/.test(r), authRequired: (r) => /ACL|\b403\b/i.test(r) },
+  { service: 'Prometheus', ports: [9090], fp: /prometheus/i, send: HTTP_GET('/api/v1/status/buildinfo'), exposed: (r) => /"status"\s*:\s*"success"[\s\S]*prometheus|"version"/i.test(r), authRequired: (r) => /\b401\b/.test(r) },
+  { service: 'RabbitMQ Management', ports: [15672], fp: /rabbitmq/i, send: HTTP_GET('/api/overview'), exposed: (r) => /"rabbitmq_version"|"management_version"/.test(r), authRequired: (r) => /\b401\b/.test(r) },
+  { service: 'Kubernetes API', ports: [6443, 8080, 10250], fp: /kube|k8s/i, send: HTTP_GET('/version'), exposed: (r) => /"gitVersion"|"buildDate"[\s\S]*"platform"/.test(r), authRequired: (r) => /\b401\b|\b403\b|Unauthorized|forbidden/i.test(r) },
+]
 
 /** Ports worth adding to the default sweep because they host unauth-prone services. */
-export const UNAUTH_PORTS = Object.keys(PROBES).map(Number)
+export const UNAUTH_PORTS = [...new Set(PROBES.flatMap((p) => p.ports))]
 
-/** Probe every open port that maps to a known auth-expecting service. Returns a
- *  finding per exposed service (and a clean note is left to the caller). */
-export async function scanUnauth(pin: string, host: string, open: PortResult[], timeoutMs: number): Promise<NetFinding[]> {
-  const targets = open.filter((p) => PROBES[p.port])
-  const out = await Promise.all(
-    targets.map(async (p) => {
-      const probe = PROBES[p.port]
-      const resp = await talk(pin, p.port, probe.send, timeoutMs)
-      if (resp == null) return null
-      if (probe.exposed(resp)) {
-        return {
-          severity: 'critical',
-          kind: 'unauthenticated-service',
-          detail: `${probe.service} answered a protocol probe WITHOUT authentication — the datastore/API is exposed (framed reply: ${defang(resp.replace(/\s+/g, ' ').slice(0, 80))})`,
-          at: `${host}:${p.port}`,
-          suggestedFix: `require authentication on ${probe.service} and firewall the port to trusted networks only — an unauthenticated ${probe.service} is remote data access/RCE-adjacent`,
-          confidence: 'strong',
-        } as NetFinding
-      }
-      if (probe.authRequired(resp)) {
-        return {
-          severity: 'info', kind: 'service-auth-ok', detail: `${probe.service} required authentication (probe rejected) — good`,
-          at: `${host}:${p.port}`, suggestedFix: 'no action — the service is not anonymously exposed', confidence: 'moderate',
-        } as NetFinding
-      }
-      return null // inconclusive → stays UNKNOWN
-    }),
-  )
-  return out.filter(Boolean) as NetFinding[]
+/**
+ * Probe open ports for missing authentication. `inspectedPorts` are the ports that
+ * already answered TLS/HTTP (so we don't re-probe them blindly); anything open,
+ * un-fingerprinted and NOT in that set is a "dark" port that gets the distinctive
+ * text-protocol hellos. Returns one finding per exposed service.
+ */
+export async function scanUnauth(pin: string, host: string, open: PortResult[], timeoutMs: number, inspectedPorts: Set<number> = new Set()): Promise<NetFinding[]> {
+  const jobs: Array<Promise<NetFinding | null>> = []
+  for (const p of open) {
+    const id = `${p.product ?? ''} ${p.service ?? ''} ${p.banner ?? ''}`.trim()
+    const isDark = !p.product && !p.banner && !inspectedPorts.has(p.port)
+    // Which probes apply to THIS port: exact port, fingerprint match anywhere, or
+    // (for a dark port) the cheap text-protocol identifiers.
+    const applicable = PROBES.filter((pr) => pr.ports.includes(p.port) || (id && pr.fp?.test(id)) || (isDark && pr.darkEligible))
+    // De-dupe by service and cap how many hellos a single dark port receives.
+    const seen = new Set<string>()
+    const chosen = applicable.filter((pr) => (seen.has(pr.service) ? false : (seen.add(pr.service), true))).slice(0, isDark ? 4 : 3)
+    for (const probe of chosen) jobs.push(runProbe(pin, host, p.port, probe, timeoutMs))
+  }
+  const out = await Promise.all(jobs)
+  // Keep at most one finding per host:port (prefer a CRITICAL exposed over auth-ok).
+  const byAt = new Map<string, NetFinding>()
+  for (const f of out) {
+    if (!f) continue
+    const at = f.at ?? f.kind
+    const prev = byAt.get(at)
+    if (!prev || (f.severity === 'critical' && prev.severity !== 'critical')) byAt.set(at, f)
+  }
+  return [...byAt.values()]
 }
 
-/** One benign request/response over raw TCP, pinned to the vetted IP. Reads until
- *  the peer pauses or the deadline, whichever first; never writes twice. */
-function talk(ip: string, port: number, send: string | null, timeoutMs: number): Promise<string | null> {
+async function runProbe(pin: string, host: string, port: number, probe: UnauthProbe, timeoutMs: number): Promise<NetFinding | null> {
+  const resp = await talk(pin, port, probe.send, timeoutMs)
+  if (resp == null) return null
+  if (probe.exposed(resp)) {
+    return {
+      severity: 'critical', kind: 'unauthenticated-service',
+      detail: `${probe.service} answered a protocol probe WITHOUT authentication — exposed on port ${port} (framed reply: ${defang(resp.replace(/[^\x20-\x7e]+/g, ' ').trim().slice(0, 80))})`,
+      at: `${host}:${port}`,
+      suggestedFix: `require authentication on ${probe.service} and firewall the port to trusted networks — an unauthenticated ${probe.service} is remote data access / RCE-adjacent`,
+      confidence: 'strong',
+    }
+  }
+  if (probe.authRequired(resp)) {
+    return { severity: 'info', kind: 'service-auth-ok', detail: `${probe.service} required authentication (probe rejected) — good`, at: `${host}:${port}`, suggestedFix: 'no action — not anonymously exposed', confidence: 'moderate' }
+  }
+  return null
+}
+
+/** One benign request/response over raw TCP, pinned to the vetted IP. */
+function talk(ip: string, port: number, send: string | Buffer | null, timeoutMs: number): Promise<string | null> {
   return new Promise((resolve) => {
     const sock = new net.Socket()
     let buf = ''
@@ -83,18 +134,9 @@ function talk(ip: string, port: number, send: string | null, timeoutMs: number):
     sock.setTimeout(timeoutMs)
     sock.once('timeout', () => finish(buf || null))
     sock.once('error', () => finish(buf || null))
-    sock.once('connect', () => {
-      if (send) sock.write(send)
-    })
-    sock.on('data', (d) => {
-      buf += d.toString('latin1')
-      if (buf.length > 4096) finish(buf) // enough to classify; don't drain a firehose
-    })
+    sock.once('connect', () => { if (send) sock.write(send) })
+    sock.on('data', (d) => { buf += d.toString('latin1'); if (buf.length > 8192) finish(buf) })
     sock.once('close', () => finish(buf || null))
-    try {
-      sock.connect(port, ip)
-    } catch {
-      finish(null)
-    }
+    try { sock.connect(port, ip) } catch { finish(null) }
   })
 }

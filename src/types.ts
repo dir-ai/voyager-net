@@ -86,6 +86,10 @@ export interface HttpSurface {
   corsCredentials: boolean
   /** An http:// root that 301/302s to https://. */
   redirectsToHttps: boolean
+  /** Web application identified from the body (title/generator/signature) — FRAMED.
+   *  e.g. "Jenkins", "Grafana", "phpMyAdmin". Turns "HTTP with weak headers" into
+   *  "Jenkins exposed" so a CVE lookup can target the actual product. */
+  app: string | null
 }
 
 export interface NetBrief {
