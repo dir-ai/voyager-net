@@ -2,6 +2,7 @@ import { lookup } from 'node:dns/promises'
 import { parseTarget, blockedIpReason } from './authorize.js'
 import { scanDns } from './dns.js'
 import { scanPorts, DEFAULT_PORTS } from './ports.js'
+import { scanUnauth } from './unauth.js'
 import { inspectTls } from './tls.js'
 import { inspectHttp } from './http.js'
 import type { Confidence, NetBrief, NetFinding, ScanOptions } from './types.js'
@@ -63,8 +64,13 @@ export async function scan(input: string, opts: ScanOptions = {}): Promise<NetBr
   const tlsPorts = new Set(tlsInfos.map((t) => t.port))
   const httpInfos = (await Promise.all(open.map((p) => inspectHttp(pin, host, p.port, tlsPorts.has(p.port), timeoutMs + 3000)))).filter(Boolean) as NonNullable<Awaited<ReturnType<typeof inspectHttp>>>[]
 
+  // ── Unauthenticated-service detection (N1): does an open datastore/admin port
+  // answer a benign protocol hello with NO auth? (Redis PING, Elastic GET, …) ────
+  log('probing exposed services for missing authentication…')
+  const unauthFindings = await scanUnauth(pin, host, open, timeoutMs)
+
   // ── Findings ────────────────────────────────────────────────────────────────
-  const findings: NetFinding[] = []
+  const findings: NetFinding[] = [...unauthFindings]
   const notes: string[] = []
   // Honesty: an open port with NO banner and no TLS/HTTP answer is genuinely
   // unknown (not "clean"). A fingerprinted service (ssh/redis/…) isn't "dark".

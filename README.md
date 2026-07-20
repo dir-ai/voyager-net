@@ -28,9 +28,15 @@ voyager-net scan 10.0.5.20 --authorized --ports 22,80,443,5432
 - **Ports** — a bounded common-service probe by plain TCP `connect()` with **real
   states** (open / closed / filtered / unreachable — an OS timeout reads as
   *filtered*, not closed), no SYN tricks, no payloads, no range/CIDR sweeps.
-- **Passive service fingerprinting** — reads the banner a service *volunteers* on
-  connect (SSH, SMTP, FTP, POP3, IMAP) to identify product + version (framed). It
-  never sends a probe.
+- **Service fingerprinting** — reads the banner a service *volunteers* on connect
+  (SSH, SMTP, FTP, POP3, IMAP) to identify product + version (framed).
+- **Unauthenticated-service detection** — for auth-expecting services (Redis,
+  Memcached, Elasticsearch, CouchDB, Docker API, ZooKeeper) it sends ONE benign,
+  read-only protocol hello (e.g. Redis `PING`) and reports the service as exposed
+  only if it answers *without* asking for credentials. Honest scope: this and the
+  TLS/HTTP inspectors DO send bytes (a ClientHello, a `GET /`, a protocol hello) —
+  the audit is active-but-safe (no writes, no mutation, no exploit), not purely
+  passive, and it runs only against the host you authorized.
 - **TLS** — the full set of **accepted** protocol versions (not just the
   negotiated one), chain trust against the system store (**any** validation
   failure is reported, not only self-signed), RSA key size (EC/EdDSA exempted),

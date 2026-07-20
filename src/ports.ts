@@ -4,7 +4,7 @@ import type { PortResult, PortState } from './types.js'
 
 // A small, common service set — enough to spot an exposed surface without
 // behaving like a scanner. NOT a full 65k sweep (that would be intrusive).
-export const DEFAULT_PORTS = [21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 587, 993, 995, 3000, 3306, 3389, 5432, 5900, 6379, 8080, 8443, 9200, 27017]
+export const DEFAULT_PORTS = [21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 587, 993, 995, 2181, 2375, 3000, 3306, 3389, 5432, 5900, 5984, 6379, 8080, 8443, 9200, 11211, 27017]
 
 const SERVICE: Record<number, string> = {
   21: 'ftp', 22: 'ssh', 23: 'telnet', 25: 'smtp', 53: 'dns', 80: 'http', 110: 'pop3', 143: 'imap',
