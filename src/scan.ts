@@ -94,7 +94,7 @@ export async function scan(input: string, opts: ScanOptions = {}): Promise<NetBr
   const vncFindings = await scanVnc(pin, host, open, inspected, timeoutMs)
   const axfrFindings = t.kind === 'domain' && open.some((p) => p.port === 53) ? await scanAxfr(pin, host, host, 53, timeoutMs + 2000) : []
   const rdpFindings = (await Promise.all(open.filter((p) => p.port === 3389 || /\brdp\b/i.test(`${p.product ?? ''} ${p.service ?? ''}`)).map((p) => inspectRdp(pin, host, p.port, timeoutMs + 2000)))).flat()
-  const telnetFindings = (await Promise.all(open.filter((p) => p.port === 23 || /telnet/i.test(`${p.product ?? ''} ${p.service ?? ''}`)).map((p) => inspectTelnet(pin, host, p.port, timeoutMs)))).flat()
+  const telnetFindings = (await Promise.all(open.filter((p) => p.port === 23 || /telnet/i.test(`${p.product ?? ''} ${p.service ?? ''}`) || (!p.product && !inspected.has(p.port))).map((p) => inspectTelnet(pin, host, p.port, timeoutMs)))).flat()
 
   // Dual-stack: scan every ADDITIONAL resolved address (e.g. the IPv6) for open
   // ports + unauth/db/ssh, so a service exposed only there isn't missed.
@@ -136,6 +136,8 @@ export async function scan(input: string, opts: ScanOptions = {}): Promise<NetBr
       const cn = c.cipher.toUpperCase()
       if (/RC4|3DES|DES-|_DES|NULL|EXPORT|MD5|RC2/.test(cn)) findings.push({ severity: 'high', kind: 'weak-cipher', detail: `negotiates a broken cipher: ${c.cipher}`, at: `${host}:${c.port}`, suggestedFix: 'disable RC4/3DES/DES/NULL/EXPORT ciphers; use AEAD suites (AES-GCM / ChaCha20-Poly1305)', confidence: 'strong' })
       else if (!/^(ECDHE|DHE|TLS_)/.test(cn) && (c.protocol === 'TLSv1.2' || c.protocol === 'TLSv1.1' || c.protocol === 'TLSv1')) findings.push({ severity: 'medium', kind: 'no-forward-secrecy', detail: `cipher ${c.cipher} uses RSA key exchange — NO forward secrecy (a future private-key compromise decrypts all past captured sessions)`, at: `${host}:${c.port}`, suggestedFix: 'prefer ECDHE/DHE key-exchange suites (or TLS 1.3, which is always forward-secret)', confidence: 'moderate' })
+      // ECDHE/DHE + CBC keeps forward secrecy but the CBC mode is Lucky13/POODLE-adjacent — a low, not a break (Kimi #4).
+      else if (/^(ECDHE|DHE)/.test(cn) && /-CBC-|_CBC_/.test(cn)) findings.push({ severity: 'low', kind: 'legacy-cbc', detail: `cipher ${c.cipher} uses a legacy CBC mode (Lucky13/padding-oracle class) despite forward secrecy`, at: `${host}:${c.port}`, suggestedFix: 'prefer AEAD suites (AES-GCM / ChaCha20-Poly1305) over CBC', confidence: 'moderate' })
     }
   }
 

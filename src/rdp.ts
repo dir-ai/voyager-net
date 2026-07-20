@@ -29,6 +29,11 @@ export async function inspectRdp(pin: string, host: string, port: number, timeou
 export async function inspectTelnet(pin: string, host: string, port: number, timeoutMs: number): Promise<NetFinding[]> {
   const banner = await grab(pin, port, timeoutMs)
   if (banner == null) return []
+  // Only flag if it actually looks like Telnet — the IAC negotiation bytes (0xff +
+  // 0xfb..0xfe) OR a login/password prompt — so this runs safely on ANY port (Kimi #3)
+  // without mislabelling arbitrary banner services.
+  const looksTelnet = /\xff[\xfb-\xfe]/.test(banner) || /(?:^|\W)(?:login|username|password)\s*:/i.test(banner)
+  if (port !== 23 && !looksTelnet) return []
   const clean = defang(banner.replace(/[^\x20-\x7e]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80))
   return [{
     severity: 'high', kind: 'telnet-cleartext',

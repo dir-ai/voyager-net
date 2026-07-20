@@ -76,6 +76,10 @@ const PROBES: UnauthProbe[] = [
   { service: 'Weaviate (vector DB)', ports: [8080], fp: /weaviate/i, darkEligible: true, send: HTTP_GET('/v1/meta'), exposed: (r) => /"hostname"[\s\S]*"version"|"modules"\s*:/.test(r), authRequired: (r) => /\b401\b|\b403\b/.test(r) },
   { service: 'ChromaDB (vector DB)', ports: [8000], fp: /chroma/i, darkEligible: true, send: HTTP_GET('/api/v1/heartbeat'), exposed: (r) => /nanosecond.?heartbeat/i.test(r), authRequired: (r) => /\b401\b|\b403\b/.test(r) },
   { service: 'MQTT broker', ports: [1883], fp: /mqtt|mosquitto/i, darkEligible: true, send: mqttConnect(), exposed: (r) => r.charCodeAt(0) === 0x20 && r.length >= 4 && r.charCodeAt(3) === 0x00, authRequired: (r) => r.charCodeAt(0) === 0x20 && r.length >= 4 && (r.charCodeAt(3) === 0x04 || r.charCodeAt(3) === 0x05) },
+  // Milvus (vector DB) speaks gRPC on :19530 — send the HTTP/2 preface + empty SETTINGS;
+  // a gRPC server replies with a SETTINGS frame (type 0x04 at offset 3). Port-scoped so a
+  // normal HTTP/2 web server elsewhere isn't mislabelled. The 5th major vector DB (Kimi #2).
+  { service: 'Milvus (vector DB, gRPC)', ports: [19530], fp: /milvus/i, send: Buffer.from('PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00', 'latin1'), exposed: (r) => r.length >= 5 && r.charCodeAt(3) === 0x04, authRequired: () => false },
 ]
 
 /** A minimal MQTT v3.1.1 CONNECT packet (clean session, client-id "voyager"). An
